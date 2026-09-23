@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>衡水 · 一天</title>
+<style>
+  :root{
+    --paper:#f4e7e5;
+    --paper-deep:#ecd8d5;
+    --red:#c8323a;
+    --red-soft:rgba(200,50,58,.35);
+    --ink:#000;
+    --graphite:#3a3a3c;
+    --serif:"Noto Serif SC","Source Han Serif SC","Songti SC","STSong","SimSun",serif;
+    --sans:"Noto Sans SC","Source Han Sans SC","PingFang SC","Microsoft YaHei","Heiti SC",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--paper-deep);color:var(--ink)}
+  body{
+    font-family:var(--serif);line-height:1.7;
+    padding:max(24px,env(safe-area-inset-top)) 16px max(32px,env(safe-area-inset-bottom));
+    -webkit-font-smoothing:antialiased;
+  }
+  .sheet{
+    max-width:980px;margin:0 auto;background:var(--paper);
+    padding:clamp(20px,4vw,44px);
+    border:1px solid var(--red-soft);
+    background-image:
+      linear-gradient(var(--red-soft) 1px,transparent 1px);
+    background-size:100% 34px;
+    background-position:0 -1px;
+    position:relative;
+  }
+  /* four locator blocks, as printed on machine-read answer sheets */
+  .sheet::before,.sheet::after,.foot::before,.foot::after{
+    content:"";position:absolute;width:18px;height:10px;background:var(--ink);
+  }
+  .sheet::before{top:12px;left:12px}
+  .sheet::after{top:12px;right:12px}
+  .foot::before{bottom:12px;left:12px}
+  .foot::after{bottom:12px;right:12px}
+
+  header{background:var(--paper);padding-bottom:18px;border-bottom:2px solid var(--red)}
+  h1{
+    font-family:var(--sans);font-weight:900;margin:0;
+    font-size:clamp(36px,7vw,68px);letter-spacing:.18em;line-height:1.15;text-align:center;
+  }
+  .meta{text-align:center;margin:6px 0 18px;font-size:15px;color:var(--graphite);letter-spacing:.06em}
+  .meta span{display:inline-block;white-space:nowrap;margin:0 .7em}
+  .fields{display:flex;flex-wrap:wrap;gap:12px 28px;justify-content:center;font-size:15px}
+  .field{display:flex;align-items:baseline;gap:8px;color:var(--red)}
+  .field span.line{
+    display:inline-block;min-width:120px;border-bottom:1.5px solid var(--red);
+    font-family:"Kaiti SC","STKaiti","KaiTi",var(--serif);
+    color:var(--graphite);font-size:18px;text-align:center;height:1.6em;line-height:1.6em;
+  }
+
+  .notice{
+    margin:22px 0;padding:14px 18px;border:1.5px solid var(--red);background:var(--paper);
+    font-size:15px;max-width:44em;
+  }
+  .notice h2{font-family:var(--sans);font-size:15px;margin:0 0 4px;color:var(--red);font-weight:700;letter-spacing:.1em}
+  .notice ol{margin:0;padding-left:1.4em}
+  .notice li{margin:2px 0}
+
+  .answer{border:2px solid var(--red);padding:10px;background:var(--paper)}
+  .answer .tab{
+    font-family:var(--sans);font-weight:700;color:var(--red);font-size:14px;
+    letter-spacing:.2em;margin:0 0 8px 2px;
+  }
+  .screen{position:relative;aspect-ratio:16/9;background:#000;overflow:hidden}
+  video{position:absolute;inset:0;width:100%;height:100%;display:block;background:#000}
+
+  .gate{
+    position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
+    background:#000;color:#e9e3e1;transition:opacity .45s ease;
+  }
+  .gate.gone{opacity:0;pointer-events:none}
+  .bubble{
+    appearance:none;border:0;background:none;cursor:pointer;color:inherit;
+    display:flex;align-items:center;gap:16px;font:inherit;font-size:clamp(16px,2.4vw,20px);letter-spacing:.12em;
+    padding:10px 14px;
+  }
+  .bubble:disabled{cursor:progress;opacity:.55}
+  .oval{
+    width:clamp(58px,8vw,78px);height:clamp(28px,3.8vw,36px);border:2.5px solid var(--red);border-radius:50%;
+    position:relative;overflow:hidden;flex:none;display:grid;place-items:center;
+    font-family:var(--sans);font-size:13px;color:var(--red);letter-spacing:0;
+  }
+  .oval::after{
+    content:"";position:absolute;inset:0;background:var(--ink);border-radius:50%;
+    transform:scaleX(0);transform-origin:left center;
+  }
+  .bubble:not(:disabled):hover .oval,.bubble:focus-visible .oval{background:rgba(200,50,58,.15)}
+  .bubble:focus-visible{outline:2px solid var(--red);outline-offset:4px}
+  .filled .oval::after{transform:scaleX(1);transition:transform .38s steps(7)}
+  .filled .oval{border-color:#fff}
+  .status{font-size:13px;color:#8f8886;letter-spacing:.08em;min-height:1.4em}
+
+  .foot{margin:18px 0 8px;text-align:center;font-size:13px;color:var(--red)}
+
+  @media (max-width:560px){
+    body{padding-left:8px;padding-right:8px}
+    .fields{justify-content:flex-start}
+    .field span.line{min-width:96px}
+    .foot{font-size:12px;padding:0 20px}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .filled .oval::after{transition:none}
+    .gate{transition:none}
+  }
+</style>
+</head>
+<body>
+<main class="sheet">
+  <header>
+    <h1>衡水 · 一天</h1>
+    <p class="meta"><span>高三年级第 1095 次模拟考试</span><span>考试时间：60 秒</span></p>
+    <div class="fields">
+      <div class="field">姓名 <span class="line" id="name"></span></div>
+      <div class="field">班级 <span class="line">高三(1)班</span></div>
+      <div class="field">距高考 <span class="line" id="days">365 天</span></div>
+    </div>
+  </header>
+
+  <section class="notice" aria-labelledby="n-h">
+    <h2 id="n-h">注意事项</h2>
+    <ol>
+      <li>请打开声音，建议佩戴耳机。</li>
+      <li>含高频闪烁画面和突然的巨响，对光敏感者请慎看。</li>
+      <li>作答时间 60 秒，结束后可以重考。</li>
+    </ol>
+  </section>
+
+  <section class="answer" aria-label="作答区">
+    <p class="tab">作答区</p>
+    <div class="screen">
+      <video id="v" playsinline preload="auto"></video>
+      <div class="gate" id="gate">
+        <button class="bubble" id="start" disabled>
+          <span class="oval" aria-hidden="true">开</span>
+          <span id="label">涂黑此处，开始考试</span>
+        </button>
+        <p class="status" id="status" role="status">正在分发试卷……</p>
+      </div>
+    </div>
+  </section>
+
+  <p class="foot">请在作答区域内作答，超出黑色矩形边框限定区域的答案无效</p>
+</main>
+
+
+<script>
+(function(){
+  const v = document.getElementById('v');
+  const gate = document.getElementById('gate');
+  const btn = document.getElementById('start');
+  const label = document.getElementById('label');
+  const status = document.getElementById('status');
+  const nameEl = document.getElementById('name');
+  const daysEl = document.getElementById('days');
+  async function load(){
+    status.textContent = '视频载入中';
+    const paths = ['media/video.part01', 'media/video.part02', 'media/video.part03', 'media/video.part04', 'media/video.part05', 'media/video.part06', 'media/video.part07', 'media/video.part08', 'media/video.part09', 'media/video.part10', 'media/video.part11', 'media/video.part12', 'media/video.part13', 'media/video.part14', 'media/video.part15', 'media/video.part16', 'media/video.part17'];
+    const responses = await Promise.all(paths.map(path => fetch(path)));
+    if (responses.some(response => !response.ok)) {
+      throw new Error('视频分段载入失败');
+    }
+    const parts = await Promise.all(responses.map(response => response.arrayBuffer()));
+    const blob = new Blob(parts, {type:'video/mp4'});
+    v.src = URL.createObjectURL(blob);
+    v.load();
+    btn.disabled = false;
+    status.textContent = '试卷已发放';
+  }
+
+  btn.addEventListener('click', function(){
+    btn.classList.add('filled');
+    btn.disabled = true;
+    nameEl.textContent = '';
+    v.currentTime = 0;
+    const p = v.play();
+    if (p && p.catch) p.catch(function(){
+      status.textContent = '浏览器拦截了自动播放，请再点一次';
+      btn.classList.remove('filled');
+      btn.disabled = false;
+    });
+  });
+
+  v.addEventListener('playing', function(){
+    gate.classList.add('gone');
+    v.controls = true;
+  });
+
+  v.addEventListener('timeupdate', function(){
+    // the countdown field follows the film: 365 → 0 around 20–46 s, then resets
+    const t = v.currentTime;
+    let d = 365;
+    if (t >= 20 && t < 45){ const u = (t - 20) / 25; d = 3 + Math.round(362 * (1 - u * u)); }
+    else if (t >= 45 && t < 46) d = t < 45.333 ? 3 : (t < 45.667 ? 2 : 1);
+    else if (t >= 46 && t < 50) d = 0;
+    daysEl.textContent = d + ' 天';
+  });
+
+  v.addEventListener('ended', function(){
+    v.controls = false;
+    nameEl.textContent = '下一个';
+    daysEl.textContent = '365 天';
+    btn.classList.remove('filled');
+    btn.disabled = false;
+    label.textContent = '涂黑此处，再来一天';
+    status.textContent = '';
+    gate.classList.remove('gone');
+    btn.focus({preventScroll:true});
+  });
+
+  load().catch(function(){
+    status.textContent = '视频载入失败：文件可能不完整，请重新下载';
+  });
+})();
+</script>
+</body>
+</html>

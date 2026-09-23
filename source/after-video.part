@@ -1,0 +1,86 @@
+</script>
+<script>
+(function(){
+  const v = document.getElementById('v');
+  const gate = document.getElementById('gate');
+  const btn = document.getElementById('start');
+  const label = document.getElementById('label');
+  const status = document.getElementById('status');
+  const nameEl = document.getElementById('name');
+  const daysEl = document.getElementById('days');
+  const payload = document.getElementById('payload');
+
+  function decodeManual(b64){
+    const CH = 1 << 20; // decode in 1 MB-aligned slices to keep memory spikes small
+    const parts = [];
+    for (let i = 0; i < b64.length; i += CH * 4){
+      const bin = atob(b64.slice(i, i + CH * 4));
+      const u8 = new Uint8Array(bin.length);
+      for (let j = 0; j < bin.length; j++) u8[j] = bin.charCodeAt(j);
+      parts.push(u8);
+    }
+    return new Blob(parts, {type:'video/mp4'});
+  }
+
+  async function load(){
+    const b64 = payload.textContent.trim();
+    payload.textContent = '';
+    let blob;
+    try {
+      blob = await (await fetch('data:video/mp4;base64,' + b64)).blob();
+    } catch (e) {
+      blob = decodeManual(b64);
+    }
+    v.src = URL.createObjectURL(blob);
+    v.load();
+    btn.disabled = false;
+    status.textContent = '试卷已发放';
+  }
+
+  btn.addEventListener('click', function(){
+    btn.classList.add('filled');
+    btn.disabled = true;
+    nameEl.textContent = '';
+    v.currentTime = 0;
+    const p = v.play();
+    if (p && p.catch) p.catch(function(){
+      status.textContent = '浏览器拦截了自动播放，请再点一次';
+      btn.classList.remove('filled');
+      btn.disabled = false;
+    });
+  });
+
+  v.addEventListener('playing', function(){
+    gate.classList.add('gone');
+    v.controls = true;
+  });
+
+  v.addEventListener('timeupdate', function(){
+    // the countdown field follows the film: 365 → 0 around 20–46 s, then resets
+    const t = v.currentTime;
+    let d = 365;
+    if (t >= 20 && t < 45){ const u = (t - 20) / 25; d = 3 + Math.round(362 * (1 - u * u)); }
+    else if (t >= 45 && t < 46) d = t < 45.333 ? 3 : (t < 45.667 ? 2 : 1);
+    else if (t >= 46 && t < 50) d = 0;
+    daysEl.textContent = d + ' 天';
+  });
+
+  v.addEventListener('ended', function(){
+    v.controls = false;
+    nameEl.textContent = '下一个';
+    daysEl.textContent = '365 天';
+    btn.classList.remove('filled');
+    btn.disabled = false;
+    label.textContent = '涂黑此处，再来一天';
+    status.textContent = '';
+    gate.classList.remove('gone');
+    btn.focus({preventScroll:true});
+  });
+
+  load().catch(function(){
+    status.textContent = '视频载入失败：文件可能不完整，请重新下载';
+  });
+})();
+</script>
+</body>
+</html>
