@@ -1,0 +1,6 @@
+#!/bin/bash
+# run python with skia's EGL shim available
+export LD_LIBRARY_PATH=/opt/film/libshim:/opt/pw-browsers/chromium-1194/chrome-linux:$LD_LIBRARY_PATH
+export PYTHONPATH=/opt/film:/opt/film/lib:$PYTHONPATH
+export FONTCONFIG_FILE=${FONTCONFIG_FILE:-/etc/fonts/fonts.conf}
+exec python3 "$@" 2> >(grep -v -E "Fontconfig warning|Creating a resampler|in_sample_rate|output_sample_rate|Unknown token|^$" >&2)
