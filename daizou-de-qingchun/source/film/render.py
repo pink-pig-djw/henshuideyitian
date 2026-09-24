@@ -227,11 +227,11 @@ def render_video(film, out_path, fps=FPS, workers=4, t0=0.0, t1=None, audio=True
         srt = os.path.splitext(out_path)[0] + '.zh.srt'
         if t0 == 0 and (t1 is None or t1 >= film.duration - 0.01):
             film.srt(srt)
-            subprocess.run([FFMPEG, '-y', '-loglevel', 'error', '-i', vid, '-i', wav, '-i', srt,
-                            '-map', '0:v', '-map', '1:a', '-map', '2:s', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
-                            '-c:s', 'mov_text', '-metadata:s:s:0', 'language=chi', '-metadata:s:s:0', 'title=中文',
-                            '-disposition:s:0', '0',
-                            '-metadata:s:a:0', 'language=chi', '-movflags', '+faststart', '-shortest', out_path], check=True)
+            # subtitles are burned into the picture; the .srt is shipped beside the MP4 rather than
+            # embedded (MP4 marks an embedded track default, and players would show subtitles twice)
+            subprocess.run([FFMPEG, '-y', '-loglevel', 'error', '-i', vid, '-i', wav,
+                            '-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+                            '-metadata:s:a:0', 'language=chi', '-movflags', '+faststart', out_path], check=True)   # no -shortest (would cut to the shortest stream)
         else:
             subprocess.run([FFMPEG, '-y', '-loglevel', 'error', '-i', vid, '-i', wav, '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
                             '-movflags', '+faststart', '-shortest', out_path], check=True)

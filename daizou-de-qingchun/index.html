@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>「贷」走的青春</title>
+<style>
+  :root{
+    --bg:#0b0c0e;
+    --ink:#ecebe6;
+    --mute:#8f9196;
+    --line:#26282c;
+    --red:#b3312c;
+    --paper:#eee3cf;
+    --serif:"Noto Serif SC","Source Han Serif SC","Songti SC","STSong","SimSun",serif;
+    --sans:"Noto Sans SC","Source Han Sans SC","PingFang SC","Microsoft YaHei","Heiti SC",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink)}
+  body{
+    font-family:var(--serif);line-height:1.8;
+    padding:max(28px,env(safe-area-inset-top)) 16px max(40px,env(safe-area-inset-bottom));
+    -webkit-font-smoothing:antialiased;
+  }
+  main{max-width:1040px;margin:0 auto}
+  header{text-align:center;margin:8px 0 26px}
+  h1{
+    font-weight:900;margin:0;letter-spacing:.12em;line-height:1.2;
+    font-size:clamp(34px,7vw,64px);
+  }
+  h1 .dai{color:var(--red)}
+  .sub{margin:6px 0 0;color:var(--mute);font-family:var(--sans);font-size:14px;letter-spacing:.3em}
+  .note{
+    margin:0 auto 22px;max-width:720px;padding:14px 18px;border:1px solid var(--line);
+    font-size:15px;color:#c9c9c4;
+  }
+  .note p{margin:0}
+  .note p + p{margin-top:6px}
+  .note b{color:var(--ink);font-weight:600}
+  .screen{position:relative;aspect-ratio:16/9;background:#000;border:1px solid var(--line)}
+  video{position:absolute;inset:0;width:100%;height:100%;display:block;background:#000}
+  .gate{
+    position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
+    background:#000;transition:opacity .6s ease;
+  }
+  .gate.gone{opacity:0;pointer-events:none}
+  .gate button{
+    font:inherit;font-size:17px;letter-spacing:.3em;color:var(--ink);background:transparent;
+    border:1px solid #55575c;padding:12px 30px;cursor:pointer;
+  }
+  .gate button:disabled{opacity:.35;cursor:default}
+  .gate button:not(:disabled):hover{border-color:var(--ink)}
+  .status{font-family:var(--sans);font-size:13px;color:var(--mute);letter-spacing:.15em;min-height:1.2em}
+  .bar{width:min(320px,70%);height:2px;background:#222}
+  .bar i{display:block;height:100%;width:0;background:#9a9a96;transition:width .2s}
+  .meta{
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px 28px;
+    margin:26px 0 0;font-size:15px;color:#c9c9c4;
+  }
+  .meta h2{font-family:var(--sans);font-size:13px;font-weight:500;letter-spacing:.3em;color:var(--mute);margin:0 0 6px}
+  .meta p{margin:0}
+  .help{margin-top:28px;padding-top:18px;border-top:1px solid var(--line);font-size:15px}
+  .help .num{font-family:var(--sans);letter-spacing:.05em;color:var(--ink);white-space:nowrap}
+  a{color:var(--ink)}
+  footer{margin-top:26px;color:var(--mute);font-family:var(--sans);font-size:12px;letter-spacing:.08em}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>「<span class="dai">贷</span>」走的青春</h1>
+    <p class="sub">微电影 · 41 分 46 秒</p>
+  </header>
+
+  <div class="note">
+    <p>本作涉及校园贷、暴力催收与自杀议题。全片不呈现自杀过程。</p>
+    <p>如果你正在经历困难，请拨打 <b>全国统一心理援助热线 12356</b>，或 <b>希望24热线 400-161-9995</b>（24 小时）。</p>
+  </div>
+
+  <div class="screen">
+    <video id="v" playsinline preload="auto"></video>
+    <div class="gate" id="gate">
+      <button id="start" disabled>播放</button>
+      <div class="bar"><i id="bar"></i></div>
+      <div class="status" id="status">视频载入中</div>
+    </div>
+  </div>
+
+  <section class="meta">
+    <div>
+      <h2>两条线</h2>
+      <p>【循环】5月9日：冷色证物室与宿舍平面图，镜头固定。【倒计时】62 天：张朝阳的铅笔速写本，4:3 画幅，纸色随天数变灰。</p>
+    </div>
+    <div>
+      <h2>字幕</h2>
+      <p>中文字幕已嵌入画面；另附可开关的字幕文件 <a href="film.zh.srt" download>中文字幕（.srt）</a>。</p>
+    </div>
+    <div>
+      <h2>制作</h2>
+      <p>影像与声音全部由程序生成；配音为 ZipVoice 零样本语音合成，音色来自 Kokoro 中文说话人。</p>
+    </div>
+  </section>
+
+  <section class="help">
+    <p>遭遇非法放贷或暴力催收，请拨打 <span class="num">110</span> 报警，并保留合同、转账记录与通话录音作为证据。</p>
+  </section>
+
+  <footer>原著剧本：《「贷」走的青春》微电影剧本（终稿）</footer>
+</main>
+
+<script>
+(function(){
+  const v = document.getElementById('v');
+  const gate = document.getElementById('gate');
+  const btn = document.getElementById('start');
+  const status = document.getElementById('status');
+  const bar = document.getElementById('bar');
+  const paths = ["media/film.part00", "media/film.part01", "media/film.part02", "media/film.part03", "media/film.part04", "media/film.part05", "media/film.part06", "media/film.part07", "media/film.part08", "media/film.part09", "media/film.part10", "media/film.part11", "media/film.part12", "media/film.part13", "media/film.part14", "media/film.part15", "media/film.part16", "media/film.part17", "media/film.part18", "media/film.part19"];
+
+  async function load(){
+    let done = 0;
+    const parts = await Promise.all(paths.map(async function(path){
+      const r = await fetch(path);
+      if (!r.ok) throw new Error(path);
+      const buf = await r.arrayBuffer();
+      done += 1;
+      bar.style.width = Math.round(done / paths.length * 100) + '%';
+      status.textContent = '视频载入中 ' + done + ' / ' + paths.length;
+      return buf;
+    }));
+    v.src = URL.createObjectURL(new Blob(parts, {type:'video/mp4'}));
+    v.load();
+    btn.disabled = false;
+    status.textContent = '';
+  }
+
+  btn.addEventListener('click', function(){
+    btn.disabled = true;
+    const p = v.play();
+    if (p && p.catch) p.catch(function(){
+      status.textContent = '浏览器拦截了自动播放，请再点一次';
+      btn.disabled = false;
+    });
+  });
+  v.addEventListener('playing', function(){ gate.classList.add('gone'); v.controls = true; });
+  v.addEventListener('ended', function(){
+    v.controls = false; gate.classList.remove('gone');
+    btn.textContent = '再看一次'; btn.disabled = false; v.currentTime = 0;
+  });
+
+  load().catch(function(){ status.textContent = '视频载入失败：分段文件可能不完整'; });
+})();
+</script>
+</body>
+</html>

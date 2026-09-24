@@ -12,7 +12,7 @@
 | 时长 | 约 41 分 46 秒（序幕 + 十四场 + 尾声） |
 | 画面 | 1920×1080，24 fps，H.264 |
 | 声音 | 48 kHz 立体声，AAC |
-| 字幕 | 中文字幕已嵌入画面；另有可开关的中文字幕轨（MP4 内）和 `film.zh.srt` |
+| 字幕 | 中文字幕已嵌入画面（每句台词都有）；另附带说话人标注的 `film.zh.srt` |
 
 ### 两套视觉系统
 
@@ -45,12 +45,22 @@
 2. **循环次数**：第十二场李浩然的「十一次了」改为「十五次了」。前面各场的循环计数依次是 11、12、13、14、15。
 3. 片头增加内容提示卡，片尾增加制作说明。
 
+## 观看
+
+- **网页**：用任意静态服务器打开 `index.html`（例如 GitHub Pages，或在本目录运行 `python3 -m http.server`）。页面会把分段拼成完整的 MP4 播放。
+- **本地文件**：把分段按顺序拼回去即可得到原始 MP4（SHA-256 `db9a20ed3987af2074c13e04942356fec1c3498911def1d63509baa31ffecffd`）：
+
+  ```
+  cat media/film.part* > 贷走的青春.mp4        # macOS / Linux
+  copy /b media\film.part* 贷走的青春.mp4      # Windows
+  ```
+
 ## 目录
 
 ```
 daizou-de-qingchun/
 ├── index.html        播放页：从分段文件拼出 MP4 播放
-├── media/            成片 MP4 的分段（film.partNN）
+├── media/            成片 MP4 的 20 个分段（film.part00 … film.part19，每段 19 MB）
 ├── film.zh.srt       中文字幕
 └── source/           生成影片的全部代码
     ├── film/         引擎：时间线、配音、混音、音效、铅笔素描、字体排版、渲染
