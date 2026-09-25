@@ -134,7 +134,7 @@
   function loop() {
     if (!exporting) {
       const t = now();
-      if (playing || dirty) { MV.render(t); dirty = false; }
+      if (playing || dirty) { try { MV.render(t); } catch (e) { showError(e.message); } dirty = false; }
       if (playing && t >= MV.duration - .05) pause();
       $('clock').textContent = `${fmtClock(t)} / 04:57`;
       drawPlayhead(t);
@@ -393,6 +393,11 @@
   $('cancelBtn').onclick = () => abort && abort.abort();
   $('saveMp4').onclick = () => lastBlob && offer(`${baseName()}-手绘MV-歌词版.mp4`, lastBlob, $('saveInfo'));
 
+  // ---------- errors: show them on the preview so a blank screen explains itself ----------
+  function showError(msg) { const el = $('badge'); el.hidden = false; el.textContent = `画面出错：${msg}`; el.style.background = 'rgba(160,40,30,.85)'; }
+  addEventListener('error', e => showError(e.message || String(e.error)));
+  addEventListener('unhandledrejection', e => showError((e.reason && e.reason.message) || String(e.reason)));
+
   // ---------- boot ----------
   function syncControls() {
     for (const name of ['reveal', 'mode', 'position']) for (const r of document.querySelectorAll(`input[name="${name}"]`)) r.checked = r.value === S.options[name];
@@ -406,7 +411,7 @@
   restore();
   $('lyrics').value = S.raw;
   syncControls();
-  MV.ready.then(() => {
+  MV.ready.catch(e => showError('初始化失败 ' + (e && e.message))).then(() => {
     S.parsed = TIMING.parse(S.raw);
     if (!S.lines || !S.lines.length) { const r = timeLines(S.parsed, S.source === 'lrc' && S.parsed.isLRC ? 'lrc' : 'template'); S.lines = r.lines; }
     if (S.isSample) report('现在显示的是示例歌词。粘贴你的歌词后点「应用歌词」。', false);
