@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+</head>
+<body>
+<!--page-->
+<title>七里香 MV 歌词工坊</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+  :root {
+    --bg: #eceef1; --panel: #f9fafb; --sunk: #e3e6ea; --ink: #22252a; --muted: #656b74; --line: #d3d7dd;
+    --accent: #e5b233; --accent-ink: #2a2418; --leaf: #3d7345; --warn: #b5462f; --focus: #2f6fb0;
+    --shadow: 0 1px 0 rgba(20, 24, 30, .04), 0 8px 24px -12px rgba(20, 24, 30, .18);
+    --sans: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    --brush: MaShan, "Ma Shan Zheng", "Kaiti SC", STKaiti, KaiTi, serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #15171b; --panel: #1d2025; --sunk: #25292f; --ink: #e7e9ec; --muted: #9aa1aa; --line: #30353c;
+      --accent: #f0c04f; --accent-ink: #1d1a12; --leaf: #86bb90; --warn: #e5846b; --focus: #7fb0e6;
+      --shadow: 0 1px 0 rgba(0, 0, 0, .3), 0 10px 28px -14px rgba(0, 0, 0, .6);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #15171b; --panel: #1d2025; --sunk: #25292f; --ink: #e7e9ec; --muted: #9aa1aa; --line: #30353c;
+    --accent: #f0c04f; --accent-ink: #1d1a12; --leaf: #86bb90; --warn: #e5846b; --focus: #7fb0e6;
+    --shadow: 0 1px 0 rgba(0, 0, 0, .3), 0 10px 28px -14px rgba(0, 0, 0, .6);
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 14px; line-height: 1.55;
+    padding-inline: 16px; padding-block: 18px 40px; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+  .top { max-width: 1440px; margin: 0 auto 14px; display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 10px 24px; }
+  .brand { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  .brand h1 { margin: 0; font-family: var(--brush); font-weight: 400; font-size: 34px; letter-spacing: .04em; line-height: 1.1; text-wrap: balance; }
+  .brand p { margin: 0; color: var(--muted); }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); font-size: 12.5px; }
+  .chip i { width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
+  .chip.ok i { background: var(--leaf); } .chip.warn i { background: var(--warn); } .chip.demo i { background: var(--accent); }
+
+  .app { max-width: 1440px; margin: 0 auto; display: grid; gap: 16px; grid-template-columns: minmax(0, 1.7fr) minmax(330px, 1fr); align-items: start; }
+  @media (max-width: 1000px) { .app { grid-template-columns: minmax(0, 1fr); } }
+
+  .stage { display: grid; gap: 10px; min-width: 0; }
+  .screen { position: relative; width: 100%; max-width: 100%; aspect-ratio: 16 / 9; background: #0b0a09; border-radius: 8px; overflow: hidden; box-shadow: var(--shadow); }
+  .screen canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .screen .badge { position: absolute; left: 12px; top: 10px; padding: 2px 9px; border-radius: 4px; background: rgba(20, 20, 22, .62); color: #f3efe6; font-size: 12px; pointer-events: none; }
+  .transport { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .transport .time { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); white-space: nowrap; }
+  #timeline { flex: 1; min-width: 0; height: 44px; border-radius: 6px; background: var(--sunk); cursor: pointer; touch-action: none; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--muted); font-size: 12.5px; }
+  .legend b { font-weight: 500; color: var(--ink); }
+
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; white-space: nowrap; }
+  .btn:hover:not(:disabled) { border-color: var(--muted); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 700; }
+  .btn.primary:hover:not(:disabled) { filter: brightness(1.05); border-color: var(--accent); }
+  .btn.round { width: 40px; height: 40px; padding: 0; border-radius: 50%; }
+  .btn.small { padding: 3px 8px; font-size: 12.5px; }
+  .btn.tap { width: 100%; padding: 14px; font-size: 16px; background: var(--warn); border-color: var(--warn); color: #fff; font-weight: 700; }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); min-width: 0; }
+  .steps { display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid var(--line); }
+  .steps button { border: 0; background: none; padding: 11px 6px 9px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; display: flex; flex-direction: column; align-items: center; gap: 1px; }
+  .steps button span { font-family: var(--mono); font-size: 11px; letter-spacing: .08em; }
+  .steps button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 700; }
+  .pane { padding: 16px; display: grid; gap: 14px; }
+  .pane h2 { margin: 0; font-size: 15px; }
+  .pane .hint { margin: 0; color: var(--muted); font-size: 13px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .field { display: grid; gap: 6px; }
+  .field > label, .label { font-size: 12.5px; color: var(--muted); letter-spacing: .02em; }
+  textarea#lyrics { width: 100%; min-height: 300px; resize: vertical; padding: 10px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); line-height: 1.7; font-size: 14px; }
+  input[type="text"], input[type="number"], select { padding: 6px 9px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); min-width: 0; }
+  input[type="range"] { accent-color: var(--accent); width: 100%; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; flex-wrap: wrap; }
+  .seg label { position: relative; }
+  .seg input { position: absolute; opacity: 0; pointer-events: none; }
+  .seg span { display: block; padding: 6px 12px; cursor: pointer; border-right: 1px solid var(--line); }
+  .seg label:last-child span { border-right: 0; }
+  .seg input:checked + span { background: var(--accent); color: var(--accent-ink); font-weight: 700; }
+  .seg input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: -2px; }
+  .switch { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .switch input { accent-color: var(--accent); width: 16px; height: 16px; }
+  .note { padding: 9px 12px; border-radius: 6px; background: var(--sunk); font-size: 13px; }
+  .note.warn { border-left: 3px solid var(--warn); }
+  .note.ok { border-left: 3px solid var(--leaf); }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .grid2.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+  .table-wrap { max-height: 420px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+  th { position: sticky; top: 0; background: var(--sunk); font-weight: 500; color: var(--muted); z-index: 1; }
+  td.n { font-family: var(--mono); color: var(--muted); width: 2.5em; font-variant-numeric: tabular-nums; }
+  td.t input { width: 7.2em; font-family: var(--mono); font-variant-numeric: tabular-nums; padding: 3px 6px; }
+  td.txt { min-width: 10em; }
+  tr.cur td { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+  tr.tapnext td { background: color-mix(in srgb, var(--warn) 16%, transparent); }
+  .nudge { display: inline-flex; gap: 2px; }
+
+  .progress { height: 10px; border-radius: 5px; background: var(--sunk); overflow: hidden; }
+  .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .2s linear; }
+  .stats { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--muted); }
+  kbd { font-family: var(--mono); font-size: 12px; padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; background: var(--bg); }
+  @media (prefers-reduced-motion: reduce) { .progress > div { transition: none; } }
+</style>
+
+<div class="top">
+  <div class="brand">
+    <h1>七里香 MV 歌词工坊</h1>
+    <p>把你自己的歌词写进这支手绘 MV，预览后导出 MP4</p>
+  </div>
+  <div class="chips" aria-live="polite">
+    <span class="chip" id="chipAudio"><i></i><span>音频：未载入</span></span>
+    <span class="chip demo" id="chipLyrics"><i></i><span>歌词：示例</span></span>
+  </div>
+</div>
+
+<main class="app">
+  <section class="stage" aria-label="预览">
+    <div class="screen">
+      <canvas id="mv" width="1920" height="1080"></canvas>
+      <span class="badge" id="badge">静音预览 · 载入音频后同步播放</span>
+    </div>
+    <div class="transport">
+      <button class="btn round primary" id="play" aria-label="播放">▶</button>
+      <span class="time" id="clock">00:00.0 / 04:57</span>
+      <canvas id="timeline" aria-label="时间轴，点击跳转"></canvas>
+    </div>
+    <div class="legend">
+      <span><b>空格</b> 播放 / 暂停</span><span><b>← →</b> 前后 5 秒</span><span>时间轴上的色块是每一句歌词，竖线是镜头切换</span>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="设置">
+    <div class="steps" role="tablist">
+      <button role="tab" id="tab-lyrics" aria-selected="true" aria-controls="pane-lyrics"><span>STEP 1</span>歌词</button>
+      <button role="tab" id="tab-timing" aria-selected="false" aria-controls="pane-timing"><span>STEP 2</span>对时</button>
+      <button role="tab" id="tab-style" aria-selected="false" aria-controls="pane-style"><span>STEP 3</span>样式</button>
+      <button role="tab" id="tab-export" aria-selected="false" aria-controls="pane-export"><span>STEP 4</span>导出</button>
+    </div>
+
+    <div class="pane" role="tabpanel" id="pane-lyrics" aria-labelledby="tab-lyrics">
+      <div class="field">
+        <span class="label">歌曲音频</span>
+        <div class="row">
+          <button class="btn" id="pickAudio">选择音频文件</button>
+          <span class="hint" id="audioInfo">MP3 / M4A / WAV 都可以，文件只在你的浏览器里处理，不会上传</span>
+        </div>
+        <input type="file" id="audioFile" accept="audio/*,.mp3,.m4a,.wav,.flac,.aac,.ogg" hidden>
+      </div>
+      <div class="field">
+        <label for="lyrics">歌词（一行一句，也可以直接粘贴 LRC）</label>
+        <textarea id="lyrics" spellcheck="false"></textarea>
+        <div class="row">
+          <button class="btn primary" id="apply">应用歌词</button>
+          <button class="btn" id="pickLyrics">导入 .txt / .lrc / 工程文件</button>
+          <button class="btn" id="clearLyrics">清空</button>
+        </div>
+        <input type="file" id="lyricsFile" accept=".txt,.lrc,.json,text/plain,application/json" hidden>
+      </div>
+      <div class="note" id="applyReport">现在显示的是示例歌词。粘贴你的歌词后点「应用歌词」。</div>
+      <p class="hint">可以在开头写「歌曲：」「作词：」「作曲：」，会自动写进片头片尾。用 {大括号} 或 【方括号】 圈出关键词，在「样式」里切换成关键词模式就只写这些词。</p>
+    </div>
+
+    <div class="pane" role="tabpanel" id="pane-timing" aria-labelledby="tab-timing" hidden>
+      <div class="field">
+        <span class="label">时间来源</span>
+        <div class="seg" role="radiogroup" aria-label="时间来源">
+          <label><input type="radio" name="source" value="template" checked><span>本曲逐字节奏</span></label>
+          <label><input type="radio" name="source" value="lrc"><span>LRC 时间</span></label>
+          <label><input type="radio" name="source" value="tap"><span>手动打点</span></label>
+        </div>
+        <p class="hint" id="sourceHint">按这支 MV 参考录音（4:57）里每个字的实际唱出时间，把你的歌词逐行对上去。每行字数和原曲一致时最准。</p>
+      </div>
+      <div id="tapBox" class="field" hidden>
+        <p class="hint">点「开始打点」后音乐会从头播放。每句歌词<b>刚开口</b>时按 <kbd>空格</kbd> 或下面的红色按钮，一句一下。</p>
+        <div class="row"><button class="btn" id="tapStart">开始打点</button><button class="btn" id="tapStop" disabled>结束</button><span class="hint" id="tapInfo"></span></div>
+        <button class="btn tap" id="tapBtn" disabled>这一句开始了</button>
+      </div>
+      <div class="field">
+        <label for="offset">整体提前 / 延后 <span id="offsetVal" class="stats">0.00 秒</span></label>
+        <input type="range" id="offset" min="-2" max="2" step="0.05" value="0">
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>开始</th><th>微调</th><th>歌词</th><th></th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="pane" role="tabpanel" id="pane-style" aria-labelledby="tab-style" hidden>
+      <div class="field">
+        <span class="label">显示方式</span>
+        <div class="seg" role="radiogroup" aria-label="显示方式">
+          <label><input type="radio" name="mode" value="lines" checked><span>整句手写</span></label>
+          <label><input type="radio" name="mode" value="keywords"><span>只写关键词</span></label>
+        </div>
+        <p class="hint" id="modeHint"></p>
+      </div>
+      <div class="field">
+        <span class="label">位置</span>
+        <div class="seg" role="radiogroup" aria-label="位置">
+          <label><input type="radio" name="position" value="scene" checked><span>跟随画面构图</span></label>
+          <label><input type="radio" name="position" value="bottom"><span>统一在底部</span></label>
+        </div>
+      </div>
+      <div class="grid2">
+        <div class="field">
+          <label for="font">字体</label>
+          <select id="font">
+            <option value="WenKai">霞鹜文楷（手写楷书）</option>
+            <option value="LongCang">龙藏体（钢笔手写）</option>
+            <option value="MaShan">马善政（毛笔）</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="scale">字号 <span id="scaleVal" class="stats">100%</span></label>
+          <input type="range" id="scale" min="0.75" max="1.35" step="0.05" value="1">
+        </div>
+      </div>
+      <div class="row">
+        <label class="switch"><input type="checkbox" id="doodles" checked>字旁小涂鸦</label>
+        <label class="switch"><input type="checkbox" id="pencil">铅笔跟着写</label>
+      </div>
+      <div class="grid2 two">
+        <div class="field"><label for="title">片头标题</label><input type="text" id="title" value="七里香"></div>
+        <div class="field"><label for="tagline">副标题</label><input type="text" id="tagline" value="手绘动画 MV"></div>
+        <div class="field"><label for="credit1">作词</label><input type="text" id="credit1" value="方文山"></div>
+        <div class="field"><label for="credit2">作曲</label><input type="text" id="credit2" value="周杰伦"></div>
+      </div>
+    </div>
+
+    <div class="pane" role="tabpanel" id="pane-export" aria-labelledby="tab-export" hidden>
+      <div class="grid2">
+        <div class="field">
+          <span class="label">分辨率</span>
+          <div class="seg" role="radiogroup" aria-label="分辨率">
+            <label><input type="radio" name="res" value="1080" checked><span>1080p</span></label>
+            <label><input type="radio" name="res" value="720"><span>720p</span></label>
+          </div>
+        </div>
+        <div class="field">
+          <span class="label">范围</span>
+          <div class="seg" role="radiogroup" aria-label="范围">
+            <label><input type="radio" name="range" value="all" checked><span>整首</span></label>
+            <label><input type="radio" name="range" value="clip"><span>从当前位置起 20 秒</span></label>
+          </div>
+        </div>
+      </div>
+      <div class="note" id="exportNote">导出在你的浏览器里逐帧完成，电脑版 Chrome / Edge 最快，整首大约需要几分钟。导出时请保持这个页面在前台。</div>
+      <div class="row"><button class="btn primary" id="exportBtn">生成 MP4</button><button class="btn" id="cancelBtn" hidden>取消</button></div>
+      <div class="progress" aria-hidden="true"><div id="bar"></div></div>
+      <div class="stats" id="exportStats" aria-live="polite"></div>
+      <div class="row" id="saveRow" hidden><button class="btn primary" id="saveMp4">保存 MP4</button><span class="hint" id="saveInfo"></span></div>
+      <hr style="border:0;border-top:1px solid var(--line);width:100%;margin:4px 0">
+      <div class="field">
+        <span class="label">工程与时间轴</span>
+        <div class="row"><button class="btn" id="saveProject">保存工程（.json）</button><button class="btn" id="saveLrc">导出 LRC 时间轴（.txt）</button></div>
+        <p class="hint">工程文件可以下次再导入继续改，也可以放进仓库的 <code>input/project.json</code> 用命令行渲染更高质量的版本。</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>window.MV_CONFIG = { canvas: 'mv', autoload: false, preview: false, fonts: {
+  WenKai: ['assets/fonts-web/wenkai.woff2'], MaShan: ['assets/fonts-web/mashan.woff2'], LongCang: ['assets/fonts-web/longcang.woff2'] } };</script>
+<script src="vendor/mp4-muxer.js"></script>
+<script src="src/kit.js"></script>
+<script src="src/paint.js"></script>
+<script src="src/people.js"></script>
+<script src="src/lyrics.js"></script>
+<script src="src/scenes.js"></script>
+<script src="src/template.js"></script>
+<script src="src/main.js"></script>
+<script src="src/timing.js"></script>
+<script src="src/export.js"></script>
+<script src="src/studio.js"></script>
+<!--/page-->
+</body>
+</html>

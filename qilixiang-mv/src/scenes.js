@@ -125,12 +125,12 @@ SHOT('desk', 0, 15.3, {
     ctx.drawImage(this.bg, 0, 0);
     // title on the right page (in book space)
     ctx.save(); ctx.translate(1200, 700); ctx.rotate(-.045);
-    writeText(ctx, '七里香', 390, -60, 'MaShan', 210, 2.9, .9, lt, { align: 'center', col: '#2d2a2e', dur: 1.1, double: true });
+    writeText(ctx, META.title, 390, -60, 'MaShan', Math.min(210, 640 / Math.max(1, [...META.title].length)), 2.9, .9, lt, { align: 'center', col: '#2d2a2e', dur: 1.1, double: true });
     // little blossoms bloom under the title
     for (let k = 0; k < 7; k++) { const q = clamp((lt - 6 - k * .12) / .5); if (q > 0) drawBlossom(ctx, 180 + k * 70, 10 + Math.sin(k * 1.7) * 14, 14 * easeOutBack(q), k); }
-    writeText(ctx, '作词：方文山', 390, 140, 'LongCang', 58, 7.0, .13, lt, { align: 'center', col: '#4a4540' });
-    writeText(ctx, '作曲：周杰伦', 390, 220, 'LongCang', 58, 7.9, .13, lt, { align: 'center', col: '#4a4540' });
-    writeText(ctx, '— 手绘动画 MV —', 390, 330, 'LongCang', 40, 9.3, .07, lt, { align: 'center', col: '#8a7f73' });
+    if (META.credits[0]) writeText(ctx, META.credits[0], 390, 140, 'LongCang', 58, 7.0, .13, lt, { align: 'center', col: '#4a4540' });
+    if (META.credits[1]) writeText(ctx, META.credits[1], 390, 220, 'LongCang', 58, 7.9, .13, lt, { align: 'center', col: '#4a4540' });
+    if (META.tagline) writeText(ctx, `— ${META.tagline} —`, 390, 330, 'LongCang', 40, 9.3, .07, lt, { align: 'center', col: '#8a7f73' });
     ctx.restore();
     dappled(ctx, t, 2400, 1400, .2);
     ctx.restore();
@@ -762,6 +762,7 @@ SHOT('lamp', 95.6, 103.0, {
   tin: { type: 'cut', dur: 0 },
   grade: { tint: '#ff9c4a', amt: .2, vig: .75 },
   lyr: { x: 1450, y: 330, size: 124, style: 'light', rot: -.03 },
+  lyrL: { x: 1480, y: 170, rot: 0 },
   init() {
     this.bg = cached('lamp:bg', W, H, c => {
       c.fillStyle = '#233052'; c.fillRect(0, 0, W, H);
@@ -1170,6 +1171,7 @@ SHOT('shoulder', 176.6, 184.2, {
   tin: { type: 'cut', dur: 0 },
   grade: { tint: '#8aa6c8', amt: .18, vig: .6 },
   lyr: { x: 960, y: 1010, size: 110, style: 'light' },
+  lyrL: { x: 960, y: 1030, style: 'ink', halo: true },
   init() { this.bg = cached('shoulder:bg', W, H, c => { paintRainStreet(c, W, H); c.save(); c.globalAlpha = .35; c.fillStyle = '#e9edf0'; c.fillRect(0, 0, W, H); c.restore(); }); },
   draw(ctx, lt, t) {
     ctx.drawImage(this.bg, 0, 0);
@@ -1186,6 +1188,7 @@ SHOT('puddle', 184.2, 189.4, {
   tin: { type: 'cut', dur: 0 },
   grade: { tint: '#7fa0c8', amt: .2, vig: .65 },
   lyr: { x: 960, y: 560, size: 150, style: 'light' },
+  lyrL: { x: 960, y: 1052, size: 62 },
   init() {
     this.ref = cached('puddle:ref', W, H, c => {
       // paint the scene upright, then flip it: feet meet the puddle's far edge
@@ -1417,6 +1420,7 @@ SHOT('buswindow', 230.6, 238.2, {
   tin: { type: 'cut', dur: 0 },
   grade: { tint: '#7a8fb2', amt: .22, vig: .7 },
   lyr: { x: 1450, y: 900, size: 124, style: 'light' },
+  lyrL: { x: 1420, y: 990, style: 'ink', halo: true },
   init() { this.bg = cached('buswindow:bg', 3800, H, c => { paintRainStreet(c, 1900, H); c.drawImage(c.canvas, 0, 0, 1900, H, 1900, 0, 1900, H); }); },
   draw(ctx, lt, t) {
     // outside world sliding past the bus window
@@ -1617,10 +1621,10 @@ SHOT('endcard', 284.0, 297.2, {
   grade: { tint: '#ffd08a', amt: .15, vig: .6 },
   draw(ctx, lt, t) {
     ctx.drawImage(TEX.paper, 0, 0);
-    writeText(ctx, '七里香', 960, 500, 'MaShan', 230, .6, .7, lt, { align: 'center', col: '#2d2a2e', dur: .9, double: true });
+    writeText(ctx, META.title, 960, 500, 'MaShan', Math.min(230, 1100 / Math.max(1, [...META.title].length)), .6, .7, lt, { align: 'center', col: '#2d2a2e', dur: .9, double: true });
     for (let k = 0; k < 9; k++) { const q = clamp((lt - 2.8 - k * .1) / .5); if (q > 0) drawBlossom(ctx, 700 + k * 65, 580 + Math.sin(k * 1.7) * 14, 15 * easeOutBack(q), k + t * .1); }
-    writeText(ctx, '作词：方文山　　作曲：周杰伦', 960, 700, 'LongCang', 56, 3.6, .07, lt, { align: 'center', col: '#4a4540' });
-    writeText(ctx, '手绘动画 MV · 纸上的那年夏天', 960, 790, 'LongCang', 42, 5.2, .05, lt, { align: 'center', col: '#8a7f73' });
+    writeText(ctx, META.credits.filter(Boolean).join('　　'), 960, 700, 'LongCang', 56, 3.6, .07, lt, { align: 'center', col: '#4a4540' });
+    writeText(ctx, [META.tagline, '纸上的那年夏天'].filter(Boolean).join(' · '), 960, 790, 'LongCang', 42, 5.2, .05, lt, { align: 'center', col: '#8a7f73' });
     drawSparrowDoodle(ctx, 1320, 420 + Math.abs(Math.sin(t * 5)) * -8, 50, t, '#3a3740');
   },
 });

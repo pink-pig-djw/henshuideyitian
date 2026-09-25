@@ -1,19 +1,39 @@
 // main.js — timeline, transitions, grading, post-processing, preview & render API.
 'use strict';
-const CANVAS = document.getElementById('c');
+// Page-level configuration (set window.MV_CONFIG before this script loads):
+//   canvas    id of the output canvas
+//   fonts     {family: [url, fallback url, ...]} loaded as FontFace from fetched bytes
+//   autoload  fetch lyrics/timing/settings from input/ (index.html and the CLI renderer)
+//   preview   wire the minimal player in index.html
+const CFG = Object.assign({
+  canvas: 'c', autoload: true, preview: true,
+  fonts: {
+    WenKai: ['assets/fonts-web/wenkai.woff2', 'assets/fonts/LXGWWenKai-Medium.ttf'],
+    MaShan: ['assets/fonts-web/mashan.woff2', 'assets/fonts/MaShanZheng-Regular.ttf'],
+    LongCang: ['assets/fonts-web/longcang.woff2', 'assets/fonts/LongCang-Regular.ttf'],
+  },
+}, window.MV_CONFIG || {});
+const CANVAS = document.getElementById(CFG.canvas);
 const OUT = CANVAS.getContext('2d');
 const LAYER_A = makeCanvas(W, H), LAYER_B = makeCanvas(W, H), MASK = makeCanvas(W, H);
 const LA = LAYER_A.getContext('2d'), LB = LAYER_B.getContext('2d'), MK = MASK.getContext('2d');
 const DURATION = 297.2;
 let BEATS = [];
+// Title card text, editable from the studio / settings.json
+const META = { title: '七里香', credits: ['作词：方文山', '作曲：周杰伦'], tagline: '手绘动画 MV' };
 
 async function loadFonts() {
-  const faces = [
-    new FontFace('WenKai', 'url(assets/fonts/LXGWWenKai-Medium.ttf)'),
-    new FontFace('MaShan', 'url(assets/fonts/MaShanZheng-Regular.ttf)'),
-    new FontFace('LongCang', 'url(assets/fonts/LongCang-Regular.ttf)'),
-  ];
-  for (const f of faces) { await f.load(); document.fonts.add(f); }
+  for (const [family, urls] of Object.entries(CFG.fonts)) {
+    for (const url of [].concat(urls)) {
+      try {
+        const r = await fetch(url);
+        if (!r.ok) continue;
+        const face = new FontFace(family, await r.arrayBuffer());
+        await face.load(); document.fonts.add(face);
+        break;
+      } catch (e) { /* try the next source */ }
+    }
+  }
   await document.fonts.ready;
 }
 
@@ -199,29 +219,57 @@ function render(t) {
 }
 
 // ---------- API ----------
-const MV = window.MV = { duration: DURATION };
-MV.ready = (async () => {
-  await loadFonts();
-  const [timing, keywords, analysis] = await Promise.all([
-    fetch('input/timing.json').then(r => r.json()),
-    fetch('input/keywords.json').then(r => r.json()).catch(() => ({})),
-    fetch('input/analysis.json').then(r => r.json()).catch(() => ({ beats: [] })),
-  ]);
-  BEATS = analysis.beats || [];
-  buildTextures(); buildPost();
-  LYR.init(timing, keywords);
-  return true;
-})();
+const MV = window.MV = { duration: DURATION, canvas: CANVAS, meta: META };
+// lines: [{text, chars: [{c, t}], kw?: [[start, length], ...]}]
+MV.setLyrics = (lines) => LYR.init(lines);
+MV.setOptions = (o) => LYR.setOptions(o);
+MV.setMeta = (m) => { Object.assign(META, m || {}); };
+MV.setBeats = (b) => { BEATS = b || []; };
 MV.render = render;
 MV.frame = t => { render(t); return CANVAS.toDataURL('image/jpeg', 0.94).split(',')[1]; };
 MV.still = t => { render(t); return CANVAS.toDataURL('image/png').split(',')[1]; };
 
-// ---------- interactive preview ----------
+// convert input/timing.json + keywords.json ({line: word}) into lyric lines
+function linesFromTiming(timing, keywords) {
+  return (timing.lines || []).map((l, i) => {
+    const kw = [];
+    const words = keywords && keywords[String(i)];
+    for (const w of [].concat(words || [])) { const a = l.text.indexOf(w); if (a >= 0) kw.push([a, [...w].length]); }
+    return { text: l.text, chars: l.chars, kw };
+  });
+}
+async function getJSON(url) { try { const r = await fetch(url); return r.ok ? await r.json() : null; } catch (e) { return null; } }
+
+MV.ready = (async () => {
+  await loadFonts();
+  buildTextures(); buildPost();
+  if (CFG.autoload) {
+    const [project, timing, keywords, analysis, settings] = await Promise.all([
+      getJSON('input/project.json'), getJSON('input/timing.json'), getJSON('input/keywords.json'),
+      getJSON('input/analysis.json'), getJSON('input/settings.json'),
+    ]);
+    BEATS = (analysis && analysis.beats) || (window.MV_TEMPLATE && MV_TEMPLATE.beats) || [];
+    if (project) { // exported from the studio
+      MV.setMeta(project.meta); LYR.setOptions(project.options || {}); LYR.init(project.lines || []);
+    } else if (timing) {
+      LYR.setOptions(Object.assign({ mode: keywords ? 'keywords' : 'lines' }, settings || {}));
+      if (settings && settings.meta) MV.setMeta(settings.meta);
+      LYR.init(linesFromTiming(timing, keywords));
+    }
+  } else if (window.MV_TEMPLATE) {
+    BEATS = MV_TEMPLATE.beats || [];
+  }
+  return true;
+})();
+
+// ---------- interactive preview (index.html) ----------
 (function preview() {
+  if (!CFG.preview) return;
   const params = new URLSearchParams(location.search);
   if (params.has('render')) { document.body.classList.add('render'); return; }
   const audio = document.getElementById('audio'), play = document.getElementById('play');
   const seek = document.getElementById('seek'), time = document.getElementById('time');
+  if (!audio || !play) return;
   let dragging = false;
   play.onclick = () => { if (audio.paused) { audio.play(); play.textContent = '暂停'; } else { audio.pause(); play.textContent = '播放'; } };
   seek.oninput = () => { dragging = true; audio.currentTime = +seek.value; };
