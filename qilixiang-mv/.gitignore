@@ -1,0 +1,7 @@
+# user-supplied media and data (not redistributed)
+input/
+# downloaded fonts (see tools/fetch_fonts.sh)
+assets/fonts/
+build/
+out/
+node_modules/

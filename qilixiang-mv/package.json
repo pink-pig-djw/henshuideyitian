@@ -1,0 +1,12 @@
+{
+  "name": "qilixiang-mv",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "serve": "node tools/server.mjs",
+    "render": "node tools/render.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "1.56.1"
+  }
+}
