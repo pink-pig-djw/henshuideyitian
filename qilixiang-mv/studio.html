@@ -212,6 +212,14 @@
         <p class="hint" id="modeHint"></p>
       </div>
       <div class="field">
+        <span class="label">出现方式</span>
+        <div class="seg" role="radiogroup" aria-label="出现方式">
+          <label><input type="radio" name="reveal" value="line" checked><span>整句直接出现</span></label>
+          <label><input type="radio" name="reveal" value="char"><span>逐字手写</span></label>
+        </div>
+        <p class="hint">整句直接出现：每句歌词在开唱前一刻整句淡入。逐字手写：唱到哪个字写到哪个字。</p>
+      </div>
+      <div class="field">
         <span class="label">位置</span>
         <div class="seg" role="radiogroup" aria-label="位置">
           <label><input type="radio" name="position" value="scene" checked><span>跟随画面构图</span></label>
@@ -234,7 +242,7 @@
       </div>
       <div class="row">
         <label class="switch"><input type="checkbox" id="doodles" checked>字旁小涂鸦</label>
-        <label class="switch"><input type="checkbox" id="pencil">铅笔跟着写</label>
+        <label class="switch"><input type="checkbox" id="pencil">铅笔跟着写（逐字模式）</label>
       </div>
       <div class="grid2 two">
         <div class="field"><label for="title">片头标题</label><input type="text" id="title" value="七里香"></div>

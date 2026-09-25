@@ -6,7 +6,7 @@
 'use strict';
 const LYR = (() => {
   let lines = [], items = [];
-  const OPT = { mode: 'lines', position: 'scene', doodles: true, pencil: false, scale: 1, font: 'WenKai', offset: 0 };
+  const OPT = { reveal: 'line', mode: 'lines', position: 'scene', doodles: true, pencil: false, scale: 1, font: 'WenKai', offset: 0 };
   const DEF = { x: W / 2, y: 940, align: 'center', size: 104, style: 'ink', track: 0.05, rot: 0 };
   const MARGIN = 110, LINE_H = 1.24;
   const MC = makeCanvas(8, 8).getContext('2d');
@@ -147,12 +147,14 @@ const LYR = (() => {
       let writing = null;
       for (let k = 0; k < f.chars.length; k++) {
         const c = f.chars[k]; if (blank(c.c)) continue;
-        const p = clamp((t - (c.t - 0.12)) / 0.34);
+        // 'line' (default): the whole line inks in at once; 'char': written character by character
+        const byLine = OPT.reveal !== 'char';
+        const p = byLine ? clamp((t - (f.first - 0.32)) / 0.45) : clamp((t - (c.t - 0.12)) / 0.34);
         if (p <= 0) continue;
         const ex = clamp((t - f.out - k * (f.mode === 'lines' ? .03 : .06)) / 0.6);
         const a = smooth(p) * (1 - smooth(ex));
         if (a <= 0.003) continue;
-        if (p < 1) writing = { x: L.xs[k] + L.w[k] * easeOut(p), y: L.ys[k] };
+        if (p < 1 && !byLine) writing = { x: L.xs[k] + L.w[k] * easeOut(p), y: L.ys[k] };
         const r = f.rnd[k];
         const bx = noise1(K.boil * .9 + k * 3.7, 11) * .9, by = noise1(K.boil * .9 + k * 5.1, 12) * .9;
         const x = L.xs[k] + bx, y = L.ys[k] + r.dy * (size / 104) + by - ex * 18 + (1 - easeOut(p)) * 6;
@@ -160,7 +162,7 @@ const LYR = (() => {
         ctx.translate(x + L.w[k] / 2, y - size * .35);
         ctx.rotate(r.rot); ctx.scale(1 + r.ds, 1 + r.ds);
         ctx.translate(-L.w[k] / 2, size * .35);
-        if (p < 1) { ctx.beginPath(); ctx.rect(-6, -size * 1.2, (L.w[k] + 12) * easeOut(p), size * 1.6); ctx.clip(); }
+        if (p < 1 && !byLine) { ctx.beginPath(); ctx.rect(-6, -size * 1.2, (L.w[k] + 12) * easeOut(p), size * 1.6); ctx.clip(); }
         ctx.globalAlpha = a;
         if (light) {
           ctx.shadowColor = 'rgba(10,14,30,.6)'; ctx.shadowBlur = size * .17; ctx.shadowOffsetY = 3;
@@ -187,7 +189,7 @@ const LYR = (() => {
           ctx.restore();
         }
       }
-      if (OPT.pencil || st.pencil) {
+      if ((OPT.pencil || st.pencil) && OPT.reveal === 'char') {
         const pa = env(t, f.first - .5, f.last + .9, .35, .5);
         if (pa > 0) {
           let px, py;

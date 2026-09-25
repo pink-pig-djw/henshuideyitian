@@ -47,7 +47,7 @@
 
   const S = {
     raw: SAMPLE, isSample: true, source: 'template', offset: 0, lines: [], parsed: null,
-    options: { mode: 'lines', position: 'scene', font: 'WenKai', scale: 1, doodles: true, pencil: false },
+    options: { reveal: 'line', mode: 'lines', position: 'scene', font: 'WenKai', scale: 1, doodles: true, pencil: false },
     meta: { title: '七里香', tagline: '手绘动画 MV', credit1: '方文山', credit2: '周杰伦' },
   };
   let audio = null; // {buffer, name, duration}
@@ -58,7 +58,7 @@
     try { localStorage.setItem(STORE, JSON.stringify({ raw: S.raw, isSample: S.isSample, source: S.source, offset: S.offset, lines: S.lines, options: S.options, meta: S.meta })); } catch (e) { /* storage unavailable */ }
   }
   function restore() {
-    try { const d = JSON.parse(localStorage.getItem(STORE) || 'null'); if (d && typeof d.raw === 'string') Object.assign(S, d); } catch (e) { /* ignore */ }
+    try { const d = JSON.parse(localStorage.getItem(STORE) || 'null'); if (d && typeof d.raw === 'string') { const opts = Object.assign({}, S.options, d.options || {}); Object.assign(S, d); S.options = opts; } } catch (e) { /* ignore */ }
   }
 
   // ---------- lyrics → timed lines ----------
@@ -276,7 +276,7 @@
   }
   for (const r of document.querySelectorAll('input[name="source"]')) r.onchange = () => setSource(r.value);
   $('offset').oninput = () => { S.offset = +$('offset').value; $('offsetVal').textContent = `${S.offset >= 0 ? '+' : ''}${S.offset.toFixed(2)} 秒`; pushToMV(); };
-  for (const name of ['mode', 'position']) for (const r of document.querySelectorAll(`input[name="${name}"]`)) r.onchange = () => { S.options[name] = r.value; pushToMV(); };
+  for (const name of ['reveal', 'mode', 'position']) for (const r of document.querySelectorAll(`input[name="${name}"]`)) r.onchange = () => { S.options[name] = r.value; pushToMV(); };
   $('font').onchange = () => { S.options.font = $('font').value; pushToMV(); };
   $('scale').oninput = () => { S.options.scale = +$('scale').value; $('scaleVal').textContent = `${Math.round(S.options.scale * 100)}%`; pushToMV(); };
   $('doodles').onchange = () => { S.options.doodles = $('doodles').checked; pushToMV(); };
@@ -395,7 +395,7 @@
 
   // ---------- boot ----------
   function syncControls() {
-    for (const name of ['mode', 'position']) for (const r of document.querySelectorAll(`input[name="${name}"]`)) r.checked = r.value === S.options[name];
+    for (const name of ['reveal', 'mode', 'position']) for (const r of document.querySelectorAll(`input[name="${name}"]`)) r.checked = r.value === S.options[name];
     $('font').value = S.options.font; $('scale').value = S.options.scale; $('scaleVal').textContent = `${Math.round(S.options.scale * 100)}%`;
     $('doodles').checked = S.options.doodles; $('pencil').checked = S.options.pencil;
     $('offset').value = S.offset; $('offsetVal').textContent = `${S.offset >= 0 ? '+' : ''}${(+S.offset).toFixed(2)} 秒`;
