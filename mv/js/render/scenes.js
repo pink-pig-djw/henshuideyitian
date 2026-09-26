@@ -61,8 +61,26 @@
     const A = rgbOf(hex);
     return 'rgba(' + A[0] + ',' + A[1] + ',' + A[2] + ',' + a + ')';
   }
+  // Memory accounting (dev/test only): bytes of every pre-rendered sprite and
+  // the number of recorded vector segments, per scene that built them.
+  const MEM = { bytes: {}, segs: {} };
+  let building = 'shared';
+  function account(kind, n) {
+    MEM[kind][building] = (MEM[kind][building] || 0) + n;
+  }
+  // Runs fn with memory attributed to `who` (shared caches built lazily).
+  function attributed(who, fn) {
+    const prev = building;
+    building = who;
+    try {
+      return fn();
+    } finally {
+      building = prev;
+    }
+  }
   function sprite(w, h, paint) {
     const s = MV.makeCanvas(w, h);
+    account('bytes', s.canvas.width * s.canvas.height * 4);
     paint(s.ctx, s.canvas.width, s.canvas.height);
     // Force rasterisation now. Chrome keeps a never-read canvas as a recorded
     // display list and would replay every path (thousands of halftone dots) on
@@ -88,6 +106,7 @@
       c = null;
     }
     if (!c) return sprite(w, h, paint);
+    account('bytes', cv.width * cv.height * 4);
     paint(c, cv.width, cv.height);
     return cv;
   }
@@ -95,9 +114,9 @@
     ctx.fillStyle = color;
     ctx.fillRect(-OVF, -OVF, W + OVF * 2, H + OVF * 2);
   }
-  function roundRectPath(c, x, y, w, h, r) {
+  function roundRectPath(c, x, y, w, h, r, keepPath) {
     r = Math.min(r, w / 2, h / 2);
-    c.beginPath();
+    if (!keepPath) c.beginPath();
     c.moveTo(x + r, y);
     c.lineTo(x + w - r, y);
     c.quadraticCurveTo(x + w, y, x + w, y + r);
@@ -108,6 +127,13 @@
     c.lineTo(x, y + r);
     c.quadraticCurveTo(x, y, x + r, y);
     c.closePath();
+  }
+  // Adds the outline band of a stroked round rect (width lw) as two subpaths;
+  // fill with 'evenodd'. Filling is cheaper than stroking a recorded path.
+  function roundRectRing(c, x, y, w, h, r, lw) {
+    const d = lw / 2;
+    roundRectPath(c, x - d, y - d, w + lw, h + lw, r + d, true);
+    roundRectPath(c, x + d, y + d, w - lw, h - lw, Math.max(0, r - d), true);
   }
   function circle(c, x, y, r) {
     c.beginPath();
@@ -133,6 +159,286 @@
   function drawStrip(ctx, img, off, y) {
     const sw = img.width;
     for (let x = stripX0(off, sw); x < W + OVS; x += sw) ctx.drawImage(img, x, y);
+  }
+
+  /* ================================================================== */
+  /* Vector display lists                                                */
+  /* ================================================================== */
+  // Big flat-colour layers (skylines, rooftops, the train interior…) used to be
+  // pre-rendered into multi-megabyte sprites. They are now *recorded* once into
+  // a few Path2D objects (one per colour / layer) and replayed every frame:
+  // near-zero memory, crisp at any camera zoom / rotation, and solid-colour
+  // path fills are as cheap as a sprite blit in software raster.
+  //
+  // A subpath is { x, y, s: [segments], z: closed }; a segment is [x, y] (line),
+  // [cx, cy, x, y] (quadratic) or [c1x, c1y, c2x, c2y, x, y] (cubic), all in
+  // recording space (the painter's transform is already applied).
+  function subArea(sp) {
+    let a = 0, px = sp.x, py = sp.y;
+    for (let k = 0; k < sp.s.length; k++) {
+      const s = sp.s[k];
+      for (let i = 0; i < s.length; i += 2) {
+        a += px * s[i + 1] - s[i] * py;
+        px = s[i];
+        py = s[i + 1];
+      }
+    }
+    return (a + px * sp.y - sp.x * py) / 2;
+  }
+  function subReverse(sp) {
+    const n = sp.s.length;
+    const last = sp.s[n - 1];
+    const out = { x: last[last.length - 2], y: last[last.length - 1], s: [], z: sp.z };
+    for (let k = n - 1; k >= 0; k--) {
+      const s = sp.s[k], pv = k > 0 ? sp.s[k - 1] : null;
+      const px = pv ? pv[pv.length - 2] : sp.x, py = pv ? pv[pv.length - 1] : sp.y;
+      if (s.length === 2) out.s.push([px, py]);
+      else if (s.length === 4) out.s.push([s[0], s[1], px, py]);
+      else out.s.push([s[2], s[3], s[0], s[1], px, py]);
+    }
+    return out;
+  }
+  function subEmit(path, sp, close) {
+    path.moveTo(sp.x, sp.y);
+    for (let k = 0; k < sp.s.length; k++) {
+      const s = sp.s[k];
+      if (s.length === 2) path.lineTo(s[0], s[1]);
+      else if (s.length === 4) path.quadraticCurveTo(s[0], s[1], s[2], s[3]);
+      else path.bezierCurveTo(s[0], s[1], s[2], s[3], s[4], s[5]);
+    }
+    if (close || sp.z) path.closePath();
+    account('segs', sp.s.length + 1);
+  }
+
+  /**
+   * Canvas-like recorder for the subset of the 2D API the painters use.
+   * Fills of one colour merge into one Path2D. Every nonzero subpath is
+   * normalised to the same winding, so merged overlapping shapes union
+   * (never cancel into holes). `rec.layer = n` groups ops by layer and colour
+   * regardless of call order (the painter guarantees that different colours in
+   * one layer never overlap); with `layer = null` only consecutive same-style
+   * ops merge, so the paint order is kept exactly.
+   */
+  function Recorder() {
+    this.m = [1, 0, 0, 1, 0, 0];
+    this.stack = [];
+    this.fillStyle = '#000';
+    this.strokeStyle = '#000';
+    this.lineWidth = 1;
+    this.lineCap = 'butt';
+    this.lineJoin = 'miter';
+    this.layer = null;
+    this.path = [];
+    this.cur = null;
+    this.ops = [];
+    this.byKey = new Map();
+    this.uid = 0;
+  }
+  const RP = Recorder.prototype;
+  RP.save = function () {
+    this.stack.push([this.m.slice(), this.fillStyle, this.strokeStyle, this.lineWidth, this.lineCap, this.lineJoin, this.layer]);
+  };
+  RP.restore = function () {
+    const s = this.stack.pop();
+    if (s) [this.m, this.fillStyle, this.strokeStyle, this.lineWidth, this.lineCap, this.lineJoin, this.layer] = s;
+  };
+  RP.transform = function (a, b, c, d, e, f) {
+    const m = this.m;
+    this.m = [m[0] * a + m[2] * b, m[1] * a + m[3] * b, m[0] * c + m[2] * d, m[1] * c + m[3] * d, m[0] * e + m[2] * f + m[4], m[1] * e + m[3] * f + m[5]];
+  };
+  RP.translate = function (x, y) {
+    this.transform(1, 0, 0, 1, x, y);
+  };
+  RP.scale = function (x, y) {
+    this.transform(x, 0, 0, y, 0, 0);
+  };
+  RP.rotate = function (a) {
+    const c = Math.cos(a), s = Math.sin(a);
+    this.transform(c, s, -s, c, 0, 0);
+  };
+  RP.tx = function (x, y) {
+    const m = this.m;
+    return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+  };
+  RP.beginPath = function () {
+    this.path = [];
+    this.cur = null;
+  };
+  RP.moveTo = function (x, y) {
+    const p = this.tx(x, y);
+    this.cur = { x: p[0], y: p[1], s: [], z: false };
+    this.path.push(this.cur);
+  };
+  RP.lineTo = function (x, y) {
+    if (!this.cur) this.moveTo(x, y);
+    else this.cur.s.push(this.tx(x, y));
+  };
+  RP.quadraticCurveTo = function (cx, cy, x, y) {
+    if (!this.cur) this.moveTo(cx, cy);
+    this.cur.s.push(this.tx(cx, cy).concat(this.tx(x, y)));
+  };
+  RP.bezierCurveTo = function (ax, ay, bx, by, x, y) {
+    if (!this.cur) this.moveTo(ax, ay);
+    this.cur.s.push(this.tx(ax, ay).concat(this.tx(bx, by), this.tx(x, y)));
+  };
+  RP.closePath = function () {
+    const c = this.cur;
+    if (!c) return;
+    c.z = true;
+    this.cur = { x: c.x, y: c.y, s: [], z: false };
+    this.path.push(this.cur);
+  };
+  // Arcs become cubic Béziers (≤ 90° each), so any affine transform is exact.
+  RP.arc = function (x, y, r, a0, a1, ccw) {
+    let sw = a1 - a0;
+    if (!ccw) sw = sw >= TAU ? TAU : mod(sw, TAU);
+    else sw = -sw >= TAU ? -TAU : -mod(-sw, TAU);
+    const sx = x + Math.cos(a0) * r, sy = y + Math.sin(a0) * r;
+    if (this.cur) this.lineTo(sx, sy);
+    else this.moveTo(sx, sy);
+    if (!sw) return;
+    const n = Math.max(1, Math.ceil(Math.abs(sw) / (Math.PI / 2) - 1e-9));
+    const d = sw / n, k = (4 / 3) * Math.tan(d / 4);
+    let a = a0;
+    for (let i = 0; i < n; i++) {
+      const b = a + d;
+      const c0 = Math.cos(a), s0 = Math.sin(a), c1 = Math.cos(b), s1 = Math.sin(b);
+      this.cur.s.push(this.tx(x + r * (c0 - k * s0), y + r * (s0 + k * c0)).concat(this.tx(x + r * (c1 + k * s1), y + r * (s1 - k * c1)), this.tx(x + r * c1, y + r * s1)));
+      a = b;
+    }
+  };
+  RP.ellipse = function (x, y, rx, ry, rot, a0, a1, ccw) {
+    this.save();
+    this.translate(x, y);
+    this.rotate(rot || 0);
+    this.scale(rx, ry);
+    this.arc(0, 0, 1, a0, a1, ccw);
+    this.restore();
+  };
+  RP.rect = function (x, y, w, h) {
+    this.moveTo(x, y);
+    this.lineTo(x + w, y);
+    this.lineTo(x + w, y + h);
+    this.lineTo(x, y + h);
+    this.closePath();
+  };
+  RP.op = function (kind, key, init) {
+    const L = this.layer;
+    let op = null;
+    if (L != null) op = this.byKey.get(L + '#' + key) || null;
+    else {
+      const last = this.ops[this.ops.length - 1];
+      if (last && last.layer == null && last.key === key) op = last;
+    }
+    if (!op) {
+      op = { k: kind, key, layer: L, n: this.ops.length, p: new Path2D() };
+      init(op);
+      this.ops.push(op);
+      if (L != null) this.byKey.set(L + '#' + key, op);
+    }
+    return op;
+  };
+  RP.fill = function (rule) {
+    const eo = rule === 'evenodd';
+    const style = this.fillStyle;
+    // even-odd fills never merge (overlaps between separate fills would cancel)
+    const op = this.op(0, 'f|' + style + (eo ? '|eo' + this.uid++ : ''), (o) => {
+      o.s = style;
+      o.r = eo ? 'evenodd' : 'nonzero';
+    });
+    for (const sp of this.path) {
+      if (!sp.s.length) continue;
+      subEmit(op.p, !eo && subArea(sp) < 0 ? subReverse(sp) : sp, true);
+    }
+  };
+  RP.stroke = function () {
+    const m = this.m;
+    const w = this.lineWidth * Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2]));
+    const st = [this.strokeStyle, w, this.lineCap, this.lineJoin];
+    const op = this.op(1, 's|' + st.join('|'), (o) => {
+      o.s = st[0];
+      o.w = st[1];
+      o.cap = st[2];
+      o.join = st[3];
+    });
+    for (const sp of this.path) if (sp.s.length) subEmit(op.p, sp, false);
+  };
+  RP.fillRect = function (x, y, w, h) {
+    const keep = [this.path, this.cur];
+    this.beginPath();
+    this.rect(x, y, w, h);
+    this.fill();
+    [this.path, this.cur] = keep;
+  };
+  RP.strokeRect = function (x, y, w, h) {
+    const keep = [this.path, this.cur];
+    this.beginPath();
+    this.rect(x, y, w, h);
+    this.stroke();
+    [this.path, this.cur] = keep;
+  };
+  // Translation-only transforms (small pre-rendered details such as ads).
+  RP.drawImage = function (img, x, y) {
+    const p = this.tx(x, y);
+    this.ops.push({ k: 2, key: null, layer: this.layer, n: this.ops.length, img, x: Math.round(p[0]), y: Math.round(p[1]) });
+  };
+  RP.finish = function () {
+    return this.ops.slice().sort((a, b) => (a.layer || 0) - (b.layer || 0) || a.n - b.n);
+  };
+  /** Records `paint(rec)` and returns the op list. */
+  function record(paint) {
+    const rec = new Recorder();
+    paint(rec);
+    return rec.finish();
+  }
+  /**
+   * Replays recorded ops. Colours starting with '@' are palette slots looked
+   * up in `pal` (one recording serves every palette of a scene).
+   */
+  function playOps(ctx, ops, pal) {
+    let stroked = false;
+    for (let i = 0; i < ops.length; i++) {
+      const op = ops[i];
+      if (op.k === 0) {
+        ctx.fillStyle = pal && op.s.charCodeAt(0) === 64 ? pal[op.s] : op.s;
+        ctx.fill(op.p, op.r);
+      } else if (op.k === 1) {
+        ctx.strokeStyle = pal && op.s.charCodeAt(0) === 64 ? pal[op.s] : op.s;
+        ctx.lineWidth = op.w;
+        ctx.lineCap = op.cap;
+        ctx.lineJoin = op.join;
+        ctx.stroke(op.p);
+        stroked = true;
+      } else {
+        ctx.drawImage(op.img, op.x, op.y);
+      }
+    }
+    if (stroked) {
+      ctx.lineCap = 'butt';
+      ctx.lineJoin = 'miter';
+    }
+  }
+  // Rasterises a recorded, horizontally tiling strip into a seamless sprite
+  // (for dense strips, e.g. thousands of tiny windows, a blit is cheaper).
+  function stripSprite(L, h, pal) {
+    return sprite(L.w, h, (c) => {
+      c.translate(-L.w, 0);
+      playOps(c, L.ops, pal);
+      c.translate(L.w, 0);
+      playOps(c, L.ops, pal);
+    });
+  }
+  // Horizontally tiling recorded strip (L = { ops, w, over }): same placement as
+  // drawStrip; the previous tile is included when its overhang is on screen.
+  function drawStripOps(ctx, L, off, y, pal) {
+    const sw = L.w;
+    let x = stripX0(off, sw);
+    if (x + (L.over || 0) > -OVS) x -= sw;
+    for (; x < W + OVS; x += sw) {
+      ctx.translate(x, y);
+      playOps(ctx, L.ops, pal);
+      ctx.translate(-x, -y);
+    }
   }
 
   const BEAT0 = {
@@ -170,7 +476,7 @@
       name,
       cache: null,
       prepare(stage) {
-        if (!scene.cache) scene.cache = spec.build ? spec.build(stage || null) : {};
+        if (!scene.cache) scene.cache = attributed(name, () => (spec.build ? spec.build(stage || null) : {}));
         return scene.cache;
       },
       draw(ctx, env, p) {
@@ -247,6 +553,7 @@
     const R = (i, j) => rand(b.seed, i, j || 0);
     const bottom = o.h, w = b.w, top = b.top;
     const cx = x + w / 2;
+    c.layer = 0; // bodies · 1 boards · 2 board art · 3 windows (see Recorder)
     c.fillStyle = o.color;
     c.fillRect(x, top, w, bottom - top);
     switch (b.type) {
@@ -319,14 +626,17 @@
         if (o.board) {
           // abstract ad: star + two bars (no text, no logos)
           const by = top - post - bh;
+          c.layer = 1;
           c.fillStyle = o.board;
           c.fillRect(bx + 4, by + 4, bw2 - 8, bh - 8);
+          c.layer = 2;
           c.fillStyle = o.color;
           D.star(c, bx + 4 + bh * 0.5, by + bh / 2, bh * 0.32, bh * 0.14);
           c.fill();
           const bl = Math.max(8, bw2 - bh * 1.2);
           c.fillRect(Math.round(bx + bh), Math.round(by + bh * 0.3), Math.round(bl * 0.85), Math.max(2, Math.round(bh * 0.14)));
           c.fillRect(Math.round(bx + bh), Math.round(by + bh * 0.56), Math.round(bl * 0.55), Math.max(2, Math.round(bh * 0.14)));
+          c.layer = 0;
         }
         break;
       }
@@ -347,6 +657,7 @@
     // windows
     const wn = o.win;
     if (!wn) return;
+    c.layer = 3;
     const cw = wn.w + wn.gx, ch = wn.h + wn.gy;
     const cols = Math.max(1, Math.floor((w - 2 * wn.m + wn.gx) / cw));
     const x0 = Math.round(x + (w - (cols * cw - wn.gx)) / 2);
@@ -378,21 +689,24 @@
       list.push({ x: Math.round(x), w: bw, top: Math.round(Math.max(24, top)), type, seed: MV.hash32(o.seed, i++), lit: r.range(o.lit[0], o.lit[1]) });
       x += bw + Math.round(r.range(o.gap[0], o.gap[1]));
     }
+    // Recorded once as vector ops (one tile; drawStripOps repeats it). Colours
+    // are palette slots ('@body', '@board', '@w0'…), resolved when drawn.
     const out = { beacons: [], flicker: [] };
-    const canvas = sprite(o.w, o.h, (c) => {
+    let over = 0;
+    const ops = record((c) => {
       for (const b of list) {
-        for (const sh of [-o.w, 0, o.w]) {
-          const bx = b.x + sh;
-          if (bx > o.w + 120 || bx + b.w < -120) continue;
-          paintBuilding(c, b, bx, o, sh === 0 ? out : null);
-        }
+        paintBuilding(c, b, b.x, o, out);
+        over = Math.max(over, b.x + b.w + 40 - o.w);
       }
     });
     out.flicker.forEach((f) => (f.x = mod(f.x, o.w)));
     out.beacons.forEach((f) => (f.x = mod(f.x, o.w)));
-    return { canvas, beacons: out.beacons, flicker: out.flicker, w: o.w };
+    return { ops, beacons: out.beacons, flicker: out.flicker, w: o.w, over };
   }
-  function drawFlicker(ctx, L, off, y0, t, seed, B, I) {
+  // Skyline window slots with fixed weights (shared by every palette).
+  const WIN3 = [['@w0', 3], ['@w1', 2], ['@w2', 1]];
+  const WIN2 = [['@w0', 3], ['@w1', 1]];
+  function drawFlicker(ctx, L, off, y0, t, seed, B, I, pal) {
     const list = L.flicker, sw = L.w;
     const x0 = stripX0(off, sw);
     for (let i = 0; i < list.length; i++) {
@@ -401,7 +715,7 @@
       if (x > W + OV) continue;
       const on = rand(seed, i, Math.floor(t * f.rate + f.ph)) < 0.42 || (B.pulse > 0.35 && rand(seed, i, B.index) < 0.1 + 0.2 * I);
       if (!on) continue;
-      ctx.fillStyle = f.c;
+      ctx.fillStyle = pal && f.c.charCodeAt(0) === 64 ? pal[f.c] : f.c;
       ctx.fillRect(x, y0 + f.y, f.w, f.h);
     }
   }
@@ -586,6 +900,10 @@
     'skyred-top': [24, 700, C.black, (v) => 1.1 * Math.pow(clamp(1 - v * 1.15), 1.5)],
     'skyred-hz': [14, 300, C.redHot, (v) => 0.9 * v],
     'train-sky': [14, 560, C.navy, (v) => 0.25 + 0.85 * v],
+    'sb-top-k': [24, 560, C.black, (v) => 1.1 * Math.pow(clamp(1 - v * 1.1), 1.6)],
+    'sb-bot-k': [24, 560, C.black, (v) => 1.1 * Math.pow(clamp(v * 1.1 - 0.1), 1.6)],
+    'sb-top-r': [24, 560, C.redDeep, (v) => 1.05 * Math.pow(clamp(1 - v * 1.1), 1.6)],
+    'sb-bot-r': [24, 560, C.redDeep, (v) => 1.05 * Math.pow(clamp(v * 1.1 - 0.1), 1.6)],
   };
   const rampTiles = new Map();
   const rampPats = new WeakMap();
@@ -668,78 +986,128 @@
   /* 1. NIGHT-CITY                                                       */
   /* ================================================================== */
   const NC = { SW: 2880, farY: 250, farH: 620, midY: 470, midH: 480, nearY: 650, nearH: 440 };
+  // Skyline geometry (one recording per layer, shared by both palettes).
+  const NC_LAYERS = {
+    far: { seed: 4101, w: NC.SW, h: NC.farH, top: [120, 400], bw: [50, 170], gap: [-6, 10], tower: 0.1, lit: [0.03, 0.16], types: [0, 1, 1, 2, 3, 4, 5, 6], color: '@body', win: { w: 5, h: 7, gx: 6, gy: 8, m: 9, colors: WIN2, flicker: 0 }, board: null },
+    mid: { seed: 4102, w: NC.SW, h: NC.midH, top: [110, 330], bw: [70, 210], gap: [-4, 14], tower: 0.06, lit: [0.05, 0.28], types: [0, 1, 2, 3, 5, 6, 0], color: '@body', win: { w: 8, h: 10, gx: 8, gy: 10, m: 10, colors: WIN3, flicker: 0.02 }, board: '@board' },
+    near: { seed: 4103, w: NC.SW, h: NC.nearH, top: [90, 290], bw: [110, 280], gap: [-2, 30], tower: 0, lit: [0.04, 0.22], types: [0, 2, 3, 5, 0, 2], color: '@body', win: { w: 14, h: 16, gx: 12, gy: 16, m: 16, colors: WIN3, flicker: 0.03 }, board: '@board' },
+  };
+  const skylineCache = new Map();
+  function sharedSkyline(key) {
+    if (!skylineCache.has(key)) skylineCache.set(key, attributed('shared', () => makeSkyline(NC_LAYERS[key])));
+    return skylineCache.get(key);
+  }
+  const NC_PALS = {
+    red: {
+      sky: C.red, skyKey: 'nc-sky-red', moon: 'red', orbit: C.black, rings: C.redDeep, pulse: C.star, beacon: C.white,
+      far: { '@body': C.redDeep, '@w0': C.redHot, '@w1': C.white },
+      mid: { '@body': C.blood, '@board': C.white, '@w0': C.white, '@w1': C.star, '@w2': C.yellow },
+      near: { '@body': C.black, '@board': C.white, '@w0': C.white, '@w1': C.red, '@w2': C.yellow },
+    },
+    navy: {
+      sky: C.navy, skyKey: 'nc-sky-navy', moon: 'navy', orbit: C.red, rings: mix(C.navy, C.star, 0.1), pulse: C.star, beacon: C.red,
+      far: { '@body': mix(C.navy, C.night, 0.55), '@w0': C.star, '@w1': C.cyan },
+      mid: { '@body': C.night, '@board': C.red, '@w0': C.star, '@w1': C.yellow, '@w2': C.red },
+      near: { '@body': C.black, '@board': C.red, '@w0': C.star, '@w1': C.red, '@w2': C.yellow },
+    },
+  };
   function buildNightCity() {
-    const pals = {
-      red: {
-        sky: C.red, skyDots: C.black, far: C.redDeep, mid: C.blood, near: C.black,
-        winFar: [[C.redHot, 3], [C.white, 1]], winMid: [[C.white, 3], [C.star, 2], [C.yellow, 1]],
-        winNear: [[C.white, 3], [C.red, 2], [C.yellow, 1]],
-        moonDisc: C.white, moonDots: C.black, moonRing: C.black, moonShadow: C.black, orbit: C.black,
-        rays: C.redHot, board: C.white, beacon: C.white,
-      },
-      navy: {
-        sky: C.navy, skyDots: C.night, far: mix(C.navy, C.night, 0.55), mid: C.night, near: C.black,
-        winFar: [[C.star, 2], [C.cyan, 1]], winMid: [[C.star, 3], [C.yellow, 1], [C.red, 1]],
-        winNear: [[C.star, 2], [C.red, 2], [C.yellow, 1]],
-        moonDisc: C.star, moonDots: C.navy, moonRing: null, moonShadow: C.red, orbit: C.red,
-        rays: mix(C.navy, C.star, 0.07), board: C.red, beacon: C.red,
-      },
+    rampTile('nc-sky-red');
+    rampTile('nc-sky-navy');
+    return {
+      far: sharedSkyline('far'), mid: sharedSkyline('mid'), near: sharedSkyline('near'),
+      moon: { red: moonSprite('red', 250), navy: moonSprite('navy', 250) },
     };
-    const K = {};
-    for (const key of ['red', 'navy']) {
-      const P = pals[key];
-      const L = { P };
-      L.skyKey = 'nc-sky-' + key;
-      rampTile(L.skyKey);
-      L.moon = makeMoon(250, P);
-      L.far = makeSkyline({ seed: 4101, w: NC.SW, h: NC.farH, top: [120, 400], bw: [50, 170], gap: [-6, 10], tower: 0.1, lit: [0.03, 0.16], types: [0, 1, 1, 2, 3, 4, 5, 6], color: P.far, win: { w: 5, h: 7, gx: 6, gy: 8, m: 9, colors: P.winFar, flicker: 0 }, board: null });
-      L.mid = makeSkyline({ seed: 4102, w: NC.SW, h: NC.midH, top: [110, 330], bw: [70, 210], gap: [-4, 14], tower: 0.06, lit: [0.05, 0.28], types: [0, 1, 2, 3, 5, 6, 0], color: P.mid, win: { w: 8, h: 10, gx: 8, gy: 10, m: 10, colors: P.winMid, flicker: 0.02 }, board: P.board });
-      L.near = makeSkyline({ seed: 4103, w: NC.SW, h: NC.nearH, top: [90, 290], bw: [110, 280], gap: [-2, 30], tower: 0, lit: [0.04, 0.22], types: [0, 2, 3, 5, 0, 2], color: P.near, win: { w: 14, h: 16, gx: 12, gy: 16, m: 16, colors: P.winNear, flicker: 0.03 }, board: P.board });
-      K[key] = L;
-    }
-    return K;
+  }
+  // Cream halftone moons, shared by night-city / crowd / sky-red. Always a
+  // shaded, cratered moon — never a plain disc (no sun imagery anywhere).
+  const MOONS = {
+    red: { disc: C.star, dots: C.black, ring: C.black, shadow: C.black },
+    navy: { disc: C.star, dots: C.navy, ring: null, shadow: C.red },
+  };
+  const moonCache = new Map();
+  function moonSprite(kind, r) {
+    const key = kind + '|' + r;
+    if (!moonCache.has(key)) moonCache.set(key, attributed('shared', () => makeMoon(r, MOONS[kind])));
+    return moonCache.get(key);
   }
   function makeMoon(r, P) {
-    const pad = 40, S = 2 * r + 2 * pad;
+    const pad = 22, S = 2 * r + 2 * pad;
     return sprite(S, S, (c) => {
       const cx = S / 2 - 6, cy = S / 2 - 6;
-      c.fillStyle = P.moonShadow;
-      circle(c, cx + 16, cy + 16, r);
+      c.fillStyle = P.shadow;
+      circle(c, cx + 14, cy + 14, r);
       c.fill();
-      c.fillStyle = P.moonDisc;
+      c.fillStyle = P.disc;
       circle(c, cx, cy, r);
       c.fill();
       c.save();
       circle(c, cx, cy, r);
       c.clip();
       D.halftone(c, cx - r, cy - r, 2 * r, 2 * r, {
-        cell: 15, angle: 35 * DEG, color: P.moonDots,
+        cell: 15, angle: 35 * DEG, color: P.dots,
         fn: (u, v) => clamp((Math.hypot(u - 0.82, v - 0.2) - 0.52) * 2.1),
       });
       // flat craters
-      c.fillStyle = rgba(P.moonDots, 0.16);
+      c.fillStyle = rgba(P.dots, 0.16);
       const cr = [[0.35, 0.4, 0.13], [0.55, 0.62, 0.08], [0.62, 0.3, 0.06], [0.3, 0.7, 0.07], [0.72, 0.5, 0.05]];
       for (const k of cr) {
         circle(c, cx - r + k[0] * 2 * r, cy - r + k[1] * 2 * r, k[2] * 2 * r);
         c.fill();
       }
       c.restore();
-      if (P.moonRing) {
+      if (P.ring) {
         c.lineWidth = 10;
-        c.strokeStyle = P.moonRing;
+        c.strokeStyle = P.ring;
         circle(c, cx, cy, r - 5);
         c.stroke();
       }
     });
   }
+  // Moon sprites are centred on (S/2 − 6, S/2 − 6) (room for the drop shadow).
+  function drawMoon(ctx, img, x, y) {
+    ctx.drawImage(img, Math.round(x - img.width / 2 + 6), Math.round(y - img.height / 2 + 6));
+  }
+  // Concentric jagged rings around (cx, cy) — the replacement for the old
+  // radial rays: rings, never wedges. Fixed radii (r0 + j·gap), slowly counter-
+  // rotating, kicking outward on the beat and fading with distance.
+  function shockRings(ctx, cx, cy, B, seed, o) {
+    const n = o.n || 3;
+    ctx.fillStyle = o.color;
+    for (let j = 0; j < n; j++) {
+      const r = o.r0 + j * o.gap + o.kick * (j + 1) * B.pulse;
+      const a = o.alpha * (1 - j / (n + 0.5));
+      if (a <= 0.01) continue;
+      ctx.globalAlpha = a;
+      const hw = (o.lw * (1 - 0.25 * j)) / 2;
+      const spikes = Math.round((TAU * (o.r0 + j * o.gap)) / o.tooth);
+      const rot = (j & 1 ? -1 : 1) * o.rot * (1 + 0.3 * j);
+      // the jagged line as an even-odd band (two offset outlines): cheaper than a stroke
+      const path = new Path2D();
+      for (const d of [-hw, hw]) {
+        const rr = r + d;
+        const pts = [];
+        for (let i = 0; i < spikes * 2; i++) {
+          const rad = (i % 2 ? rr - o.amp : rr + o.amp) + srand(seed + j, i) * o.amp * 0.5;
+          const ang = rot + (i / (spikes * 2)) * TAU + srand(seed + j, i, 7) * (Math.PI / spikes) * 0.35;
+          pts.push(cx + Math.cos(ang) * rad, cy + Math.sin(ang) * rad);
+        }
+        path.moveTo(pts[0], pts[1]);
+        for (let i = 2; i < pts.length; i += 2) path.lineTo(pts[i], pts[i + 1]);
+        path.closePath();
+      }
+      ctx.fill(path, 'evenodd');
+    }
+    ctx.globalAlpha = 1;
+  }
   function drawNightCity(ctx, env, p, K) {
     const B = beatOf(env), I = p.intensity, v = p.variant, q = env.quality || 1;
     const redSky = I >= 0.5 ? v % 3 !== 2 : v % 3 === 2;
-    const L = redSky ? K.red : K.navy, P = L.P;
+    const P = redSky ? NC_PALS.red : NC_PALS.navy;
     const tau = p.lt * p.speed + rand(p.seed, 1) * 400;
     const pan = tau * (16 + 34 * I);
     fillAll(ctx, P.sky);
-    fillRamp(ctx, L.skyKey, -OV);
+    fillRamp(ctx, P.skyKey, -OV);
     if (!redSky) {
       drawDust(ctx, dustList(71, 260, -OV, W + OV, -OV, 560, 1, 2.6), C.star);
       ctx.fillStyle = C.star;
@@ -749,9 +1117,7 @@
     }
     const mx = Math.round(1100 + rand(p.seed, 2) * 460), my = Math.round(230 + rand(p.seed, 3) * 110);
     if (I > 0.4) {
-      ctx.globalAlpha = clamp((I - 0.4) * 2.5) * (redSky ? 1 : 0.6);
-      D.rays(ctx, mx, my, 36, 2600, tau * 0.03 + B.barPulse * 0.03, P.rays);
-      ctx.globalAlpha = 1;
+      shockRings(ctx, mx, my, B, p.seed, { color: P.rings, r0: 400, gap: 90, n: 4, kick: 14, amp: 12, tooth: 46, lw: 10, rot: tau * 0.02, alpha: clamp((I - 0.4) * 2.5) * (redSky ? 0.9 : 0.7) });
     }
     // orbit arcs around the moon (rotating slowly, kick on the downbeat)
     ctx.strokeStyle = P.orbit;
@@ -764,29 +1130,29 @@
     ctx.beginPath();
     ctx.arc(mx, my, 350 + 16 * B.barPulse, -orb * 1.3 + 1, -orb * 1.3 + 3.6);
     ctx.stroke();
-    ctx.drawImage(L.moon, mx - (L.moon.width >> 1), my - (L.moon.height >> 1));
+    drawMoon(ctx, K.moon[P.moon], mx, my);
     if (B.barPulse > 0.02) {
       ctx.globalAlpha = B.barPulse * 0.7;
-      ctx.strokeStyle = redSky ? C.white : C.star;
+      ctx.strokeStyle = P.pulse;
       ctx.lineWidth = 6;
       circle(ctx, mx, my, 262 + (1 - B.barPulse) * 150);
       ctx.stroke();
       ctx.globalAlpha = 1;
     }
-    // parallax skyline layers; each is backed by a solid fill below its strip
-    drawStrip(ctx, L.far.canvas, pan * 0.18, NC.farY);
-    ctx.fillStyle = P.far;
+    // parallax skyline layers (vector); each is backed by a solid fill below it
+    drawStripOps(ctx, K.far, pan * 0.18, NC.farY, P.far);
+    ctx.fillStyle = P.far['@body'];
     ctx.fillRect(-OVF, NC.farY + NC.farH - 1, W + OVF * 2, OVF);
-    drawBeacons(ctx, L.far, pan * 0.18, NC.farY, env.t, P.beacon);
+    drawBeacons(ctx, K.far, pan * 0.18, NC.farY, env.t, P.beacon);
     drawFlocks(ctx, tau, p.seed, I, C.black, [110, 460], [16, 30], q);
-    drawStrip(ctx, L.mid.canvas, pan * 0.4, NC.midY);
-    ctx.fillStyle = P.mid;
+    drawStripOps(ctx, K.mid, pan * 0.4, NC.midY, P.mid);
+    ctx.fillStyle = P.mid['@body'];
     ctx.fillRect(-OVF, NC.midY + NC.midH - 1, W + OVF * 2, OVF);
-    drawBeacons(ctx, L.mid, pan * 0.4, NC.midY, env.t + 0.4, P.beacon);
-    drawFlicker(ctx, L.mid, pan * 0.4, NC.midY, env.t, p.seed, B, I);
-    drawStrip(ctx, L.near.canvas, pan * 0.75, NC.nearY);
-    drawFlicker(ctx, L.near, pan * 0.75, NC.nearY, env.t, p.seed + 1, B, I);
-    ctx.fillStyle = P.near;
+    drawBeacons(ctx, K.mid, pan * 0.4, NC.midY, env.t + 0.4, P.beacon);
+    drawFlicker(ctx, K.mid, pan * 0.4, NC.midY, env.t, p.seed, B, I, P.mid);
+    drawStripOps(ctx, K.near, pan * 0.75, NC.nearY, P.near);
+    drawFlicker(ctx, K.near, pan * 0.75, NC.nearY, env.t, p.seed + 1, B, I, P.near);
+    ctx.fillStyle = P.near['@body'];
     ctx.fillRect(-OVF, NC.nearY + NC.nearH - 1, W + OVF * 2, OVF);
     drawPoles(ctx, pan * 1.3, p.seed, { spacing: 1250, top: 70, color: C.black, birds: true, scale: 1 }, B);
   }
@@ -794,16 +1160,21 @@
   /* ================================================================== */
   /* 2. TRAIN                                                            */
   /* ================================================================== */
-  const TR = { U: 1000, units: 2, wx0: 140, wx1: 860, wy0: 282, wy1: 640, rodY: 150, strap: 125 };
+  const TR = { U: 1000, units: 2, wx0: 140, wx1: 860, wy0: 282, wy1: 640, rodY: 150, strap: 125, adW: 290, adH: 76 };
   function buildTrain() {
     const K = {};
+    // dense, fast-scrolling distant city (seen through the windows): a sprite
     K.city = makeSkyline({ seed: 5201, w: 2880, h: 380, top: [70, 250], bw: [40, 150], gap: [-4, 12], tower: 0.1, lit: [0.12, 0.35], types: [0, 1, 2, 4, 5, 6], color: mix(C.navy, C.night, 0.35), win: { w: 5, h: 6, gx: 5, gy: 7, m: 6, colors: [[C.star, 3], [C.yellow, 1], [C.red, 1]], flicker: 0 }, board: C.red });
+    K.cityImg = stripSprite(K.city, 380);
     rampTile('train-sky');
-    K.intRed = paintInterior({ wall: C.red, trim: C.black, ceil: C.black, lamp: C.paper, seat: C.black, seatHi: C.redDeep, rim: null, strapBelt: C.black, seed: 11 });
-    K.intBlack = paintInterior({ wall: C.black, trim: C.red, ceil: C.gray, lamp: C.star, seat: C.redDeep, seatHi: C.red, rim: C.red, strapBelt: C.gray, seed: 12 });
+    // the four ad cards are small sprites shared by both interiors
+    K.ads = [0, 1, 2, 3].map((kind) => sprite(TR.adW, TR.adH, (c) => trainAd(c, 0, 0, TR.adW, TR.adH, kind)));
+    K.intRed = paintInterior({ wall: C.red, trim: C.black, ceil: C.black, lamp: C.paper, seat: C.black, seatHi: C.redDeep, rim: null, strapBelt: C.black, seed: 11, ads: K.ads });
+    K.intBlack = paintInterior({ wall: C.black, trim: C.red, ceil: C.gray, lamp: C.star, seat: C.redDeep, seatHi: C.red, rim: C.red, strapBelt: C.gray, seed: 12, ads: K.ads });
     return K;
   }
-  function trainAd(c, x, y, w, h, kind, o) {
+  // Ad card art (no text, no logos); the frame is stroked by the interior.
+  function trainAd(c, x, y, w, h, kind) {
     c.fillStyle = C.paper;
     c.fillRect(x, y, w, h);
     c.save();
@@ -812,9 +1183,11 @@
     c.clip();
     if (kind === 0) {
       c.fillStyle = C.red;
-      circle(c, x + w * 0.3, y + h * 0.55, h * 0.42);
+      D.skewRect(c, x + w * 0.06, y + h * 0.12, w * 0.36, h * 0.76, h * 0.3);
       c.fill();
       c.fillStyle = C.black;
+      D.star(c, x + w * 0.27, y + h * 0.5, h * 0.26, h * 0.11);
+      c.fill();
       for (let i = 0; i < 4; i++) c.fillRect(x + w * 0.55, y + 14 + i * 15, w * (0.35 - i * 0.05), 7);
     } else if (kind === 1) {
       c.fillStyle = C.black;
@@ -842,9 +1215,6 @@
       c.fillRect(x + w * 0.42, y + 42, w * 0.34, 8);
     }
     c.restore();
-    c.lineWidth = 6;
-    c.strokeStyle = o.trim;
-    c.strokeRect(x, y, w, h);
   }
   // Seated, faceless passenger (front view). Cushion top at y=800.
   function seatedFigure(c, x, kind, fill) {
@@ -892,110 +1262,142 @@
       c.stroke();
     }
   }
+  // Seated passengers are small detail sprites (cheaper to blit than to fill
+  // their many overlapping round shapes every frame). Figure x = 0 ↦ sprite x 100.
+  const passengerCache = new Map();
+  function passengerSprite(kind, rim) {
+    const key = kind + '|' + (rim || '');
+    if (!passengerCache.has(key)) {
+      passengerCache.set(key, sprite(200, 480, (c) => {
+        c.translate(100, -480);
+        if (rim) seatedFigure(c, 5, kind, rim);
+        seatedFigure(c, 0, kind, C.black);
+        if (kind === 0) {
+          c.fillStyle = C.white;
+          c.fillRect(-11, 700, 22, 30);
+        }
+      }));
+    }
+    return passengerCache.get(key);
+  }
+  // Train interior, recorded as vector ops per window bay (unit): only the
+  // bays on screen are replayed. Elements are grouped into layers (bays never
+  // overlap themselves, so one layer per element keeps the paint order).
   function paintInterior(o) {
-    const U = TR.U, SW = U * TR.units;
-    return sprite(SW, H, (c) => {
-      c.fillStyle = o.wall;
-      c.fillRect(0, 0, SW, H);
-      // cut the windows
-      c.globalCompositeOperation = 'destination-out';
-      for (let u = 0; u < TR.units; u++) {
-        roundRectPath(c, u * U + TR.wx0, TR.wy0, TR.wx1 - TR.wx0, TR.wy1 - TR.wy0, 34);
-        c.fill();
-      }
-      c.globalCompositeOperation = 'source-over';
-      for (let u = 0; u < TR.units; u++) {
-        const x0 = u * U;
-        c.lineWidth = 20;
-        c.strokeStyle = o.trim;
-        roundRectPath(c, x0 + TR.wx0, TR.wy0, TR.wx1 - TR.wx0, TR.wy1 - TR.wy0, 34);
-        c.stroke();
-        c.lineWidth = 5;
-        c.strokeStyle = C.gray;
-        roundRectPath(c, x0 + TR.wx0 + 12, TR.wy0 + 12, TR.wx1 - TR.wx0 - 24, TR.wy1 - TR.wy0 - 24, 24);
-        c.stroke();
+    const U = TR.U, NU = TR.units;
+    const winW = TR.wx1 - TR.wx0, winH = TR.wy1 - TR.wy0;
+    const units = [];
+    for (let u = 0; u < NU; u++) {
+      const ops = record((c) => {
+        let L = 0;
+        // wall with the window opening (even-odd); ceiling, seat base and floor
+        // cover the rest, so only the band between them is filled
+        c.layer = L++;
+        c.fillStyle = o.wall;
+        c.beginPath();
+        c.rect(0, 118, U, 862 - 118);
+        roundRectPath(c, TR.wx0, TR.wy0, winW, winH, 34, true);
+        c.fill('evenodd');
+        c.layer = L++;
         c.fillStyle = o.trim;
-        c.fillRect(x0 + TR.wx0, TR.wy0 + 84, TR.wx1 - TR.wx0, 10);
-        // sill
-        c.fillRect(x0 + TR.wx0 - 20, TR.wy1 + 6, TR.wx1 - TR.wx0 + 40, 12);
-      }
-      // ceiling + lamps
-      c.fillStyle = o.ceil;
-      c.fillRect(0, 0, SW, 118);
-      for (let u = 0; u < TR.units; u++) {
+        c.beginPath();
+        roundRectRing(c, TR.wx0, TR.wy0, winW, winH, 34, 20);
+        c.fill('evenodd');
+        c.layer = L++;
+        c.fillStyle = C.gray;
+        c.beginPath();
+        roundRectRing(c, TR.wx0 + 12, TR.wy0 + 12, winW - 24, winH - 24, 24, 5);
+        c.fill('evenodd');
+        c.layer = L++;
+        c.fillStyle = o.trim;
+        c.fillRect(TR.wx0, TR.wy0 + 84, winW, 10);
+        c.fillRect(TR.wx0 - 20, TR.wy1 + 6, winW + 40, 12); // sill
+        c.fillRect(0, 118, U, 8);
+        c.fillRect(0, 252, U, 14); // luggage rack
+        // ceiling + lamps
+        c.layer = L++;
+        c.fillStyle = o.ceil;
+        c.fillRect(0, 0, U, 118);
+        c.layer = L++;
         c.fillStyle = o.lamp;
-        c.fillRect(u * U + 110, 36, 780, 28);
+        c.fillRect(110, 36, 780, 28);
+        c.layer = L++;
         c.fillStyle = C.black;
-        for (let k = 1; k < 6; k++) c.fillRect(u * U + 110 + k * 130, 36, 4, 28);
-      }
-      c.fillStyle = o.trim;
-      c.fillRect(0, 118, SW, 8);
-      // ads
-      for (let u = 0; u < TR.units; u++) {
-        trainAd(c, u * U + 170, 166, 290, 76, (u * 2) % 4, o);
-        trainAd(c, u * U + 540, 166, 290, 76, (u * 2 + 1) % 4, o);
-      }
-      // luggage rack
-      c.fillStyle = o.trim;
-      c.fillRect(0, 252, SW, 14);
-      c.fillStyle = C.gray;
-      for (let x = 0; x < SW; x += 18) c.fillRect(x, 255, 3, 8);
-      // strap rod
-      c.fillStyle = C.black;
-      c.fillRect(0, TR.rodY - 8, SW, 16);
-      c.fillStyle = C.white;
-      c.fillRect(0, TR.rodY - 4, SW, 7);
-      // seat
-      c.fillStyle = C.black;
-      c.fillRect(0, 862, SW, 100);
-      c.fillStyle = C.gray;
-      for (let x = 20; x < SW; x += 40) c.fillRect(x, 890, 24, 6);
-      for (let x = 20; x < SW; x += 40) c.fillRect(x, 912, 24, 6);
-      for (let u = 0; u < TR.units; u++) {
-        const x0 = u * U;
+        for (let k = 1; k < 6; k++) c.fillRect(110 + k * 130, 36, 4, 28);
+        c.fillRect(0, TR.rodY - 8, U, 16); // strap rod
+        c.fillRect(0, 862, U, 100); // seat base
+        // ads (shared sprites) + frames
+        c.layer = L++;
+        c.drawImage(o.ads[(u * 2) % 4], 170, 166);
+        c.drawImage(o.ads[(u * 2 + 1) % 4], 540, 166);
+        c.layer = L++;
+        c.fillStyle = o.trim;
+        c.beginPath();
+        roundRectRing(c, 170, 166, TR.adW, TR.adH, 0, 6);
+        roundRectRing(c, 540, 166, TR.adW, TR.adH, 0, 6);
+        c.fill('evenodd');
+        c.layer = L++;
+        c.fillStyle = C.gray;
+        for (let x = 0; x < U; x += 18) c.fillRect(x, 255, 3, 8);
+        for (let x = 20; x < U; x += 40) {
+          c.fillRect(x, 890, 24, 6);
+          c.fillRect(x, 912, 24, 6);
+        }
+        c.fillRect(0, 962, U, H - 962); // floor
+        c.layer = L++;
+        c.fillStyle = C.white;
+        c.fillRect(0, TR.rodY - 4, U, 7);
+        // seat
+        c.layer = L++;
         c.fillStyle = o.seat;
-        roundRectPath(c, x0 + 60, 724, U - 120, 92, 20);
+        roundRectPath(c, 60, 724, U - 120, 92, 20);
         c.fill();
+        c.layer = L++;
         c.fillStyle = o.seatHi;
-        for (let k = 0; k < 7; k++) c.fillRect(x0 + 110 + k * 118, 736, 6, 70);
+        for (let k = 0; k < 7; k++) c.fillRect(110 + k * 118, 736, 6, 70);
+        c.layer = L++;
         c.fillStyle = o.seat;
-        roundRectPath(c, x0 + 40, 800, U - 80, 70, 22);
+        roundRectPath(c, 40, 800, U - 80, 70, 22);
         c.fill();
+        c.layer = L++;
         c.fillStyle = o.seatHi;
-        c.fillRect(x0 + 60, 808, U - 120, 6);
-        c.lineWidth = 6;
-        c.strokeStyle = o.trim;
-        roundRectPath(c, x0 + 40, 800, U - 80, 70, 22);
-        c.stroke();
-      }
-      // floor
-      c.fillStyle = C.gray;
-      c.fillRect(0, 962, SW, H - 962);
-      c.fillStyle = rgba(C.white, 0.12);
-      c.fillRect(0, 964, SW, 5);
-      // passengers
-      for (let u = 0; u < TR.units; u++) {
+        c.fillRect(60, 808, U - 120, 6);
+        c.layer = L++;
+        c.fillStyle = o.trim;
+        c.beginPath();
+        roundRectRing(c, 40, 800, U - 80, 70, 22, 6);
+        c.fill('evenodd');
+        c.layer = L++;
+        c.fillStyle = rgba(C.white, 0.12);
+        c.fillRect(0, 964, U, 5);
+        // passengers (small sprites)
+        c.layer = L++;
         for (let s = 0; s < 2; s++) {
           if (rand(o.seed, u, s) > 0.72) continue;
-          const px = u * U + 300 + s * 380 + srand(o.seed, u, s + 5) * 50;
-          const kind = Math.floor(rand(o.seed, u, s + 9) * 3);
-          if (o.rim) seatedFigure(c, px + 5, kind, o.rim);
-          seatedFigure(c, px, kind, C.black);
-          if (kind === 0) {
-            c.fillStyle = C.white;
-            c.fillRect(px - 11, 700, 22, 30);
-          }
+          const px = 300 + s * 380 + srand(o.seed, u, s + 5) * 50;
+          c.drawImage(passengerSprite(Math.floor(rand(o.seed, u, s + 9) * 3), o.rim), Math.round(px) - 100, 480);
         }
-      }
-      // stanchion poles at the unit boundaries (drawn at 0 and SW for a seamless tile)
-      for (let u = 0; u <= TR.units; u++) {
-        const x = u * U;
+        // stanchion pole at the bay boundary
+        c.layer = L++;
         c.fillStyle = C.black;
-        c.fillRect(x - 13, 118, 26, 846);
+        c.fillRect(-13, 118, 26, 846);
+        c.layer = L++;
         c.fillStyle = C.white;
-        c.fillRect(x - 7, 118, 12, 846);
-      }
-    });
+        c.fillRect(-7, 118, 12, 846);
+      });
+      units.push(ops);
+    }
+    return units;
+  }
+  // Bays placed like drawStrip (bay k at screen x = k·U − off), culled.
+  function drawBays(ctx, units, off, y) {
+    const U = TR.U, n = units.length;
+    for (let k = Math.floor((off - OVS - 20) / U); k * U - off < W + OVS + 20; k++) {
+      const x = Math.round(k * U - off);
+      ctx.translate(x, y);
+      playOps(ctx, units[mod(k, n)]);
+      ctx.translate(-x, -y);
+    }
   }
   function drawStraps(ctx, off, tau, B, I, o) {
     const sp = TR.strap;
@@ -1040,7 +1442,7 @@
     fillAll(ctx, C.night);
     fillRamp(ctx, 'train-sky', 120);
     drawDust(ctx, dustList(5202, 90, -OV, W + OV, 250, 460, 1, 2.2), C.star);
-    drawStrip(ctx, K.city.canvas, tau * (120 + 120 * I), 320);
+    drawStrip(ctx, K.cityImg, tau * (120 + 120 * I), 320);
     drawBeacons(ctx, K.city, tau * (120 + 120 * I), 320, env.t, C.red);
     // light streaks
     const nS = Math.round((20 + 30 * I) * q);
@@ -1111,7 +1513,7 @@
     ctx.fillRect(-OVF, -OVF, W + 2 * OVF, OVF);
     ctx.fillStyle = C.gray;
     ctx.fillRect(-OVF, H - 1, W + 2 * OVF, OVF);
-    drawStrip(ctx, img, off, 0);
+    drawBays(ctx, img, off, 0);
     drawStraps(ctx, off, tau, B, I, { belt: dark ? C.gray : C.black });
     // lights flicker when the tunnel swallows the car
     if (tNow && !tPrev && B.sinceDownbeat < 0.35) {
@@ -1124,122 +1526,262 @@
   /* ================================================================== */
   /* 3. CROWD                                                            */
   /* ================================================================== */
-  // Side-view walking silhouette in unit space (feet y=0, head top ≈ −1, facing +x).
-  function walker(c, type, pose) {
-    c.lineCap = 'round';
-    c.lineJoin = 'round';
-    const limb = (pts, w) => {
-      c.lineWidth = w;
-      c.beginPath();
-      c.moveTo(pts[0][0], pts[0][1]);
-      for (let i = 1; i < pts.length; i++) c.lineTo(pts[i][0], pts[i][1]);
-      c.stroke();
-    };
-    const poly = (pts) => {
-      D.polygon(c, pts);
-      c.fill();
-    };
-    const dot = (x, y, r) => {
-      circle(c, x, y, r);
-      c.fill();
-    };
-    const coat = type === 0 || type === 5;
-    let hf, hb;
-    if (pose === 0) {
-      limb([[0.01, -0.48], [0.08, -0.25], [0.15, -0.04]], 0.088);
-      limb([[-0.01, -0.48], [-0.06, -0.26], [-0.14, -0.07]], 0.088);
-      poly([[0.11, -0.07], [0.23, -0.035], [0.23, 0], [0.1, 0]]);
-      poly([[-0.19, -0.1], [-0.1, -0.055], [-0.115, -0.015], [-0.2, -0.055]]);
-      hf = [0.14, -0.53];
-      hb = [-0.12, -0.51];
-    } else {
-      limb([[0.0, -0.48], [0.01, -0.25], [0.0, -0.04]], 0.088);
-      limb([[-0.01, -0.48], [0.085, -0.3], [-0.015, -0.13]], 0.088);
-      poly([[-0.04, -0.07], [0.085, -0.035], [0.085, 0], [-0.05, 0]]);
-      poly([[-0.05, -0.17], [0.05, -0.14], [0.04, -0.1], [-0.06, -0.12]]);
-      hf = [0.035, -0.49];
-      hb = [-0.02, -0.5];
+  // Figure kit: organic silhouettes as Path2D in unit space (feet y = 0, head
+  // top ≈ −1). A shape is a control polygon drawn as a smooth outline
+  // (quadratic curves through the edge midpoints; a point [x, y, 1] stays a
+  // sharp corner); limbs are tapered capsules. Every subpath is wound the same
+  // way, so one nonzero fill paints the union of all parts.
+  function polyArea(pts) {
+    let a = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i], q = pts[(i + 1) % pts.length];
+      a += p[0] * q[1] - q[0] * p[1];
     }
-    if (type !== 4) limb([[-0.02, -0.79], [-0.06, -0.64], hb], 0.064);
-    const torso = coat
-      ? [[-0.1, -0.835], [0.07, -0.84], [0.11, -0.6], [0.14, -0.3], [-0.14, -0.3], [-0.125, -0.62]]
-      : [[-0.1, -0.835], [0.07, -0.84], [0.1, -0.62], [0.085, -0.46], [-0.09, -0.46], [-0.115, -0.64]];
-    D.polygon(c, torso);
-    c.fill();
-    c.lineWidth = 0.05;
-    c.stroke();
-    if (type === 1) poly([[-0.1, -0.52], [0.085, -0.52], [0.15, -0.3], [-0.16, -0.3]]);
-    poly([[-0.03, -0.885], [0.035, -0.885], [0.032, -0.8], [-0.035, -0.8]]);
-    dot(0.014, -0.93, 0.062);
-    if (type === 4) limb([[0.0, -0.79], [0.03, -0.64], [0.07, -0.56]], 0.068);
-    else if (type !== 3) limb([[0.0, -0.79], [0.05, -0.65], hf], 0.064);
+    return a / 2;
+  }
+  // Bounds of everything added by the kit since the last kitBounds() reset
+  // (control points bound the curves), used to size sprites tightly.
+  let KB = null;
+  function kitBounds(reset) {
+    const b = KB;
+    if (reset) KB = [1e9, 1e9, -1e9, -1e9];
+    return b;
+  }
+  function grow(x, y, r) {
+    if (!KB) return;
+    r = r || 0;
+    if (x - r < KB[0]) KB[0] = x - r;
+    if (y - r < KB[1]) KB[1] = y - r;
+    if (x + r > KB[2]) KB[2] = x + r;
+    if (y + r > KB[3]) KB[3] = y + r;
+  }
+  function blob(path, pts) {
+    for (const p of pts) grow(p[0], p[1]);
+    if (polyArea(pts) < 0) pts = pts.slice().reverse();
+    const n = pts.length;
+    const mid = (i) => {
+      const a = pts[mod(i, n)], b = pts[mod(i + 1, n)];
+      return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    };
+    const m0 = mid(-1);
+    path.moveTo(m0[0], m0[1]);
+    for (let i = 0; i < n; i++) {
+      const p = pts[i], m = mid(i);
+      if (p[2]) {
+        path.lineTo(p[0], p[1]);
+        path.lineTo(m[0], m[1]);
+      } else path.quadraticCurveTo(p[0], p[1], m[0], m[1]);
+    }
+    path.closePath();
+  }
+  function disc(path, x, y, r) {
+    grow(x, y, r);
+    path.moveTo(x + r, y);
+    path.arc(x, y, r, 0, TAU);
+    path.closePath();
+  }
+  // Tapered limb through joints [[x, y, r], …]: round joints + tangent quads.
+  function limb(path, js) {
+    for (let i = 0; i < js.length; i++) disc(path, js[i][0], js[i][1], js[i][2]);
+    for (let i = 0; i < js.length - 1; i++) {
+      const a = js[i], b = js[i + 1];
+      const l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+      const nx = -(b[1] - a[1]) / l, ny = (b[0] - a[0]) / l;
+      let q = [[a[0] + nx * a[2], a[1] + ny * a[2]], [b[0] + nx * b[2], b[1] + ny * b[2]], [b[0] - nx * b[2], b[1] - ny * b[2]], [a[0] - nx * a[2], a[1] - ny * a[2]]];
+      if (polyArea(q) < 0) q = q.reverse();
+      path.moveTo(q[0][0], q[0][1]);
+      for (let k = 1; k < 4; k++) path.lineTo(q[k][0], q[k][1]);
+      path.closePath();
+    }
+  }
+  // Shoe at ankle (ax, ay) rotated by ang (+ = toe down / heel lifted).
+  function shoe(path, ax, ay, ang, len) {
+    const ca = Math.cos(ang), sa = Math.sin(ang);
+    const P = (u, v, s) => [ax + u * ca - v * sa, ay + u * sa + v * ca, s];
+    blob(path, [P(-0.03, -0.012), P(-0.034, 0.042, 1), P(len, 0.042, 1), P(len + 0.016, 0.026), P(len - 0.012, 0.008), P(0.03, -0.012)]);
+  }
+
+  // Side-view walkers, facing +x. Two poses (stride / passing) swap on the beat.
+  const WALK_POSES = [
+    {
+      legA: [[0.0, -0.49, 0.05], [0.085, -0.268, 0.035], [0.152, -0.058, 0.023]], footA: -0.32,
+      legB: [[-0.012, -0.49, 0.05], [-0.045, -0.262, 0.035], [-0.15, -0.09, 0.023]], footB: 0.62,
+      armA: [[-0.004, -0.795, 0.034], [-0.052, -0.655, 0.026], [-0.098, -0.53, 0.02]], handA: [-0.108, -0.505],
+      armB: [[0.004, -0.795, 0.034], [0.05, -0.66, 0.026], [0.112, -0.548, 0.02]], handB: [0.126, -0.525],
+      flare: 1,
+    },
+    {
+      legA: [[0.0, -0.49, 0.05], [0.018, -0.268, 0.035], [0.004, -0.05, 0.023]], footA: 0,
+      legB: [[-0.008, -0.49, 0.05], [0.07, -0.3, 0.035], [0.0, -0.148, 0.023]], footB: 0.72,
+      armA: [[-0.004, -0.795, 0.034], [-0.012, -0.65, 0.026], [-0.022, -0.515, 0.02]], handA: [-0.024, -0.49],
+      armB: [[0.004, -0.795, 0.034], [0.014, -0.652, 0.026], [0.03, -0.52, 0.02]], handB: [0.034, -0.495],
+      flare: 0.3,
+    },
+  ];
+  const WALK_HEAD = [[0.0, -0.99], [0.045, -0.978], [0.068, -0.94], [0.077, -0.918], [0.064, -0.902], [0.06, -0.878], [0.036, -0.86], [-0.004, -0.872], [-0.042, -0.9], [-0.05, -0.95]];
+  const WALK_TORSO = [[-0.056, -0.842], [0.012, -0.852], [0.058, -0.808], [0.064, -0.722], [0.048, -0.625], [0.056, -0.54], [0.044, -0.47], [-0.032, -0.462], [-0.07, -0.51], [-0.058, -0.625], [-0.074, -0.752]];
+  function walkerPath(type, pose) {
+    const P = WALK_POSES[pose], path = new Path2D();
+    const slim = type === 1 ? 0.86 : 1;
+    const L = (js) => js.map((j) => [j[0], j[1], j[2] * slim]);
+    blob(path, WALK_HEAD);
+    limb(path, [[0.0, -0.878, 0.021], [0.004, -0.83, 0.026]]);
+    blob(path, WALK_TORSO);
+    for (const [leg, fa] of [[P.legA, P.footA], [P.legB, P.footB]]) {
+      limb(path, L(leg));
+      shoe(path, leg[2][0], leg[2][1], fa, type === 1 ? 0.075 : 0.088);
+    }
+    let armA = P.armA, handA = P.handA;
+    let armB = P.armB, handB = P.handB;
+    if (type === 3) { // umbrella held up and forward
+      armB = [[0.004, -0.795, 0.034], [0.07, -0.715, 0.026], [0.104, -0.8, 0.02]];
+      handB = [0.106, -0.82];
+    }
+    if (type === 4) { // hands in the hoodie pocket
+      armA = [[-0.004, -0.795, 0.036], [-0.016, -0.65, 0.028], [0.034, -0.575, 0.022]];
+      armB = [[0.004, -0.795, 0.036], [0.01, -0.652, 0.028], [0.05, -0.58, 0.022]];
+      handA = handB = null;
+    }
+    limb(path, armA);
+    limb(path, armB);
+    if (handA) disc(path, handA[0], handA[1], 0.026);
+    if (handB) disc(path, handB[0], handB[1], 0.026);
+    const fl = P.flare;
     switch (type) {
-      case 0: // briefcase
-        poly([[hb[0] - 0.075, hb[1] + 0.02], [hb[0] + 0.075, hb[1] + 0.02], [hb[0] + 0.075, hb[1] + 0.13], [hb[0] - 0.075, hb[1] + 0.13]]);
+      case 0: // long coat + briefcase
+      case 5: // long coat + hat
+        blob(path, [[-0.066, -0.842], [0.016, -0.852], [0.066, -0.8], [0.07, -0.62], [0.082 + 0.03 * fl, -0.31], [0.03, -0.29, 1], [-0.1 - 0.05 * fl, -0.3, 1], [-0.082, -0.6], [-0.086, -0.76]]);
+        if (type === 0) {
+          const hx = handA[0], hy = handA[1];
+          blob(path, [[hx - 0.075, hy + 0.012, 1], [hx + 0.075, hy + 0.012, 1], [hx + 0.075, hy + 0.118, 1], [hx - 0.075, hy + 0.118, 1]]);
+          blob(path, [[hx - 0.02, hy - 0.006, 1], [hx + 0.02, hy - 0.006, 1], [hx + 0.02, hy + 0.016, 1], [hx - 0.02, hy + 0.016, 1]]);
+        } else {
+          blob(path, [[-0.048, -0.962], [-0.042, -1.045], [0.0, -1.058], [0.05, -1.04], [0.054, -0.962]]);
+          blob(path, [[-0.092, -0.968, 1], [0.108, -0.972, 1], [0.1, -0.952], [-0.086, -0.95]]);
+        }
         break;
-      case 1: // long hair + shoulder bag
-        poly([[-0.065, -0.965], [0.04, -0.99], [0.03, -0.9], [-0.02, -0.8], [-0.1, -0.74], [-0.09, -0.9]]);
-        poly([[-0.15, -0.63], [-0.04, -0.64], [-0.035, -0.5], [-0.16, -0.5]]);
+      case 1: // long hair, skirt, shoulder bag
+        blob(path, [[0.03, -0.998], [-0.035, -0.998], [-0.072, -0.95], [-0.084, -0.85], [-0.094, -0.752], [-0.052, -0.762], [-0.026, -0.86], [0.02, -0.935]]);
+        blob(path, [[-0.066, -0.632], [0.056, -0.632], [0.104 + 0.02 * fl, -0.37, 1], [-0.112 - 0.02 * fl, -0.372, 1]]);
+        limb(path, [[0.03, -0.815, 0.009], [-0.08, -0.6, 0.009]]);
+        blob(path, [[-0.138, -0.625], [-0.05, -0.632], [-0.044, -0.52], [-0.14, -0.512]]);
         break;
       case 2: // backpack + cap
-        poly([[-0.215, -0.82], [-0.075, -0.83], [-0.075, -0.55], [-0.2, -0.555], [-0.235, -0.7]]);
-        dot(0.014, -0.94, 0.068);
-        poly([[0.0, -0.97], [0.14, -0.958], [0.14, -0.938], [0.0, -0.938]]);
+        blob(path, [[-0.058, -0.832], [-0.158, -0.818], [-0.192, -0.7], [-0.178, -0.57], [-0.06, -0.562]]);
+        blob(path, [[-0.054, -0.935], [-0.046, -0.99], [0.018, -1.008], [0.062, -0.978], [0.068, -0.945]]);
+        blob(path, [[0.04, -0.952, 1], [0.148, -0.946, 1], [0.14, -0.932], [0.04, -0.934, 1]]);
         break;
       case 3: { // open umbrella
-        limb([[0.0, -0.79], [0.07, -0.7], [0.1, -0.78]], 0.058);
-        limb([[0.1, -0.76], [0.07, -1.2]], 0.018);
-        c.beginPath();
-        c.moveTo(-0.26, -1.1);
-        c.quadraticCurveTo(0.07, -1.5, 0.4, -1.1);
-        for (let k = 0; k < 6; k++) {
-          const xa = 0.4 - (k + 1) * (0.66 / 6);
-          c.quadraticCurveTo(xa + 0.055, -1.14, xa, -1.1);
-        }
-        c.closePath();
-        c.fill();
+        limb(path, [[0.106, -0.79, 0.008], [0.086, -1.43, 0.008]]);
+        blob(path, [[0.086, -1.4], [0.3, -1.33], [0.42, -1.13, 1], [0.335, -1.155], [0.255, -1.112, 1], [0.172, -1.14], [0.086, -1.1, 1], [0.0, -1.14], [-0.083, -1.112, 1], [-0.163, -1.155], [-0.248, -1.13, 1], [-0.128, -1.33]]);
         break;
       }
-      case 4: // hoodie
-        dot(-0.028, -0.92, 0.076);
-        break;
-      case 5: // hat
-        poly([[-0.09, -0.972], [0.125, -0.972], [0.125, -0.952], [-0.09, -0.952]]);
-        poly([[-0.05, -1.05], [0.07, -1.05], [0.075, -0.968], [-0.055, -0.968]]);
+      case 4: // hoodie: hood + baggy top
+        blob(path, [[-0.058, -0.862], [-0.066, -0.945], [-0.04, -0.996], [0.016, -1.004], [0.058, -0.975], [0.07, -0.935], [0.03, -0.905]]);
+        blob(path, [[-0.07, -0.845], [0.02, -0.855], [0.07, -0.79], [0.074, -0.6], [0.06, -0.49, 1], [-0.078, -0.49, 1], [-0.082, -0.62], [-0.088, -0.77]]);
         break;
       default:
     }
+    return path;
   }
-  // Original generic student (front view, faceless): messy hair, school
-  // jacket with standing collar, shoulder bag, scarf fluttering in the wind.
-  const STUDENT_PARTS = [
-    ['c', 0, -0.905, 0.078],
-    ['p', [[-0.08, -0.872], [-0.092, -0.922], [-0.08, -0.93], [-0.084, -0.965], [-0.05, -0.968], [-0.038, -0.994], [-0.006, -0.982], [0.018, -1.0], [0.042, -0.978], [0.076, -0.978], [0.076, -0.948], [0.093, -0.93], [0.08, -0.9], [0.086, -0.87], [0.066, -0.883], [0.058, -0.93], [0, -0.946], [-0.058, -0.93], [-0.066, -0.883]]],
-    ['p', [[-0.036, -0.85], [0.036, -0.85], [0.038, -0.79], [-0.038, -0.79]]],
-    ['p', [[-0.152, -0.805], [0.152, -0.805], [0.182, -0.765], [0.165, -0.6], [0.158, -0.435], [-0.158, -0.435], [-0.165, -0.6], [-0.182, -0.765]]],
-    ['p', [[-0.18, -0.782], [-0.132, -0.765], [-0.152, -0.47], [-0.2, -0.448], [-0.212, -0.62]]],
-    ['p', [[0.18, -0.782], [0.132, -0.765], [0.152, -0.47], [0.2, -0.448], [0.212, -0.62]]],
-    ['p', [[-0.112, -0.445], [-0.008, -0.445], [-0.02, -0.03], [-0.092, -0.03]]],
-    ['p', [[0.112, -0.445], [0.008, -0.445], [0.02, -0.03], [0.092, -0.03]]],
-    ['p', [[-0.1, -0.042], [-0.014, -0.042], [-0.01, 0], [-0.118, 0]]],
-    ['p', [[0.1, -0.042], [0.014, -0.042], [0.01, 0], [0.118, 0]]],
-    ['p', [[0.168, -0.565], [0.292, -0.57], [0.3, -0.395], [0.16, -0.39]]],
-  ];
-  function partPath(ctx, pt) {
-    if (pt[0] === 'c') circle(ctx, pt[1], pt[2], pt[3]);
-    else D.polygon(ctx, pt[1]);
+  const walkerCache = new Map();
+  // { path, b: [x0, y0, x1, y1] } in unit space
+  function walkerShape(type, pose) {
+    const key = type * 2 + pose;
+    if (!walkerCache.has(key)) {
+      kitBounds(true);
+      const path = walkerPath(type, pose);
+      walkerCache.set(key, { path, b: kitBounds(false) });
+      KB = null;
+    }
+    return walkerCache.get(key);
   }
-  // One scarf tail: a long, thin ribbon streaming down-wind with a travelling
-  // wave and a swallow-tail tip (reads as cloth, not as a limb).
-  function scarfTail(ctx, tau, len, ph, y0, wind, droop) {
+  /**
+   * Walker sprite at height h (facing +x): rim pass (offset rim, −0.6·rim) and
+   * body pass, tightly cropped. Returns { cv, ax, ay } (feet at ax, ay).
+   */
+  function walkerSprite(type, pose, h, rim, body, rimCol) {
+    const sh = walkerShape(type, pose), b = sh.b;
+    const pad = 3;
+    const x0 = Math.floor(b[0] * h) - pad, x1 = Math.ceil(b[2] * h + rim) + pad;
+    const y0 = Math.floor(b[1] * h - rim * 0.6) - pad, y1 = Math.ceil(b[3] * h) + pad;
+    const ax = -x0, ay = -y0;
+    const cv = sprite(x1 - x0, y1 - y0, (c) => {
+      for (const ps of [[rimCol, rim, -rim * 0.6], [body, 0, 0]]) {
+        c.save();
+        c.translate(ax + ps[1], ay + ps[2]);
+        c.scale(h, h);
+        c.fillStyle = ps[0];
+        c.fill(sh.path);
+        c.restore();
+      }
+    });
+    return { cv, ax, ay };
+  }
+
+  // The lone protagonist: an original, generic high-school student seen from
+  // the front, faceless (solid silhouette, no mask): soft messy hair, school
+  // blazer with lapels, one hand in the trouser pocket, messenger bag on a
+  // diagonal strap, scarf ends streaming in the wind, red rim light.
+  const STU = {
+    hair: [[-0.061, -0.874], [-0.068, -0.93], [-0.076, -0.957, 1], [-0.06, -0.972], [-0.052, -0.998], [-0.022, -1.012], [-0.006, -1.024, 1], [0.014, -1.01], [0.042, -1.007], [0.062, -0.99], [0.079, -0.967, 1], [0.068, -0.944], [0.069, -0.9], [0.06, -0.872], [0.05, -0.905], [0.046, -0.94], [0.0, -0.952], [-0.046, -0.94], [-0.052, -0.905]],
+    head: [[0.0, -0.988], [0.05, -0.975], [0.06, -0.93], [0.056, -0.888], [0.036, -0.856], [0.0, -0.846], [-0.036, -0.856], [-0.056, -0.888], [-0.06, -0.93], [-0.05, -0.975]],
+    neck: [[-0.024, -0.87], [0.024, -0.87], [0.026, -0.8, 1], [-0.026, -0.8, 1]],
+    blazer: [[-0.03, -0.842], [-0.09, -0.828], [-0.13, -0.81], [-0.15, -0.778], [-0.144, -0.7], [-0.128, -0.62], [-0.124, -0.52], [-0.132, -0.448, 1], [0.0, -0.438], [0.132, -0.448, 1], [0.124, -0.52], [0.128, -0.62], [0.144, -0.7], [0.15, -0.778], [0.13, -0.81], [0.09, -0.828], [0.03, -0.842]],
+    legL: [[-0.124, -0.462, 1], [-0.004, -0.462], [-0.008, -0.415, 1], [-0.028, -0.25], [-0.034, -0.05, 1], [-0.094, -0.05, 1], [-0.1, -0.25], [-0.118, -0.4]],
+    legR: [[0.124, -0.462, 1], [0.004, -0.462], [0.008, -0.415, 1], [0.03, -0.25], [0.044, -0.05, 1], [0.104, -0.05, 1], [0.104, -0.25], [0.118, -0.4]],
+    shoeL: [[-0.104, -0.002, 1], [-0.108, -0.035], [-0.09, -0.058], [-0.038, -0.058], [-0.022, -0.03], [-0.02, -0.002, 1]],
+    shoeR: [[0.03, -0.002, 1], [0.028, -0.03], [0.044, -0.058], [0.098, -0.058], [0.116, -0.035], [0.114, -0.002, 1]],
+    armL: [[-0.134, -0.772, 0.042], [-0.166, -0.618, 0.034], [-0.162, -0.484, 0.028]],
+    handL: [[-0.182, -0.49], [-0.142, -0.49], [-0.144, -0.432], [-0.16, -0.408], [-0.178, -0.43]],
+    armR: [[0.134, -0.772, 0.042], [0.186, -0.632, 0.034], [0.122, -0.518, 0.028]],
+    bag: [[-0.236, -0.53], [-0.112, -0.534], [-0.104, -0.46], [-0.11, -0.388], [-0.234, -0.386], [-0.244, -0.46]],
+    // red detail strokes (lapels, opening, buttons, cuffs, pocket, strap, bag flap, hair)
+    lines: [
+      [[-0.028, -0.836], [-0.058, -0.77], [-0.03, -0.742], [0.0, -0.622]],
+      [[0.028, -0.836], [0.058, -0.77], [0.03, -0.742], [0.0, -0.622]],
+      [[0.0, -0.622], [-0.012, -0.52], [-0.05, -0.446]],
+      [[0.0, -0.622], [0.012, -0.52], [0.05, -0.446]],
+      [[-0.112, -0.68], [-0.07, -0.684]],
+      [[-0.182, -0.512], [-0.142, -0.51]],
+      [[0.106, -0.5], [0.138, -0.532]],
+      [[0.098, -0.83], [0.084, -0.802], [-0.172, -0.532]],
+      [[0.12, -0.816], [0.106, -0.786], [-0.146, -0.53]],
+      [[-0.238, -0.505], [-0.228, -0.462], [-0.114, -0.462], [-0.108, -0.508]],
+    ],
+    dots: [[0.004, -0.588], [0.004, -0.522]],
+    wrap: [[-0.046, -0.85], [0.046, -0.85], [0.07, -0.826], [0.066, -0.796], [0.0, -0.788], [-0.066, -0.796], [-0.07, -0.826]],
+  };
+  let studentCache = null;
+  function studentShapes() {
+    if (studentCache) return studentCache;
+    const body = new Path2D();
+    for (const k of ['hair', 'head', 'neck', 'blazer', 'legL', 'legR', 'shoeL', 'shoeR', 'handL', 'bag']) blob(body, STU[k]);
+    limb(body, STU.armL);
+    limb(body, STU.armR);
+    const lines = new Path2D();
+    for (const l of STU.lines) {
+      lines.moveTo(l[0][0], l[0][1]);
+      for (let i = 1; i < l.length; i++) lines.lineTo(l[i][0], l[i][1]);
+    }
+    const dots = new Path2D();
+    for (const d of STU.dots) disc(dots, d[0], d[1], 0.007);
+    const wrap = new Path2D();
+    blob(wrap, STU.wrap);
+    studentCache = { body, lines, dots, wrap };
+    return studentCache;
+  }
+  // One scarf tail: a long ribbon streaming down-wind with a travelling wave and
+  // a swallow-tail tip (reads as cloth, not as a limb). Unit space.
+  function scarfTail(ctx, tau, len, ph, x0, y0, wind, droop, w0) {
     const n = 12, up = [], lo = [];
     const ca = Math.cos(droop), sa = Math.sin(droop);
     for (let i = 0; i <= n; i++) {
       const s = i / n;
-      const wave = (0.01 + 0.06 * s) * Math.sin(tau * 7 - s * 10 + ph) + 0.008 * Math.sin(tau * 15 + s * 16 + ph);
-      const x = 0.06 + s * len * ca - wave * sa;
+      const wave = (0.006 + 0.04 * s) * Math.sin(tau * 7 - s * 9 + ph) + 0.005 * Math.sin(tau * 15 + s * 16 + ph);
+      const x = x0 + s * len * ca - wave * sa;
       const y = y0 + s * len * sa + wave * ca;
-      const w = 0.04 * (1 - s * 0.3);
+      const w = w0 * (1 - s * 0.3);
       up.push([x + (sa * w) / 2, y - (ca * w) / 2]);
       lo.push([x - (sa * w) / 2, y + (ca * w) / 2]);
     }
@@ -1250,161 +1792,113 @@
     for (const q of pts) q[0] *= wind;
     D.polygon(ctx, pts);
   }
-  const SCARF_WRAP = [[-0.09, -0.848], [0.09, -0.848], [0.102, -0.77], [-0.102, -0.77]];
-  // Static body (outlines + fill + details) → sprite; the scarf is animated per frame.
-  function studentBody(c, h, o) {
-    c.save();
-    c.scale(h, h);
-    c.lineJoin = 'round';
-    for (const ol of o.outlines) {
-      c.strokeStyle = ol[0];
-      c.lineWidth = (ol[1] * 2) / h;
-      for (const pt of STUDENT_PARTS) {
-        partPath(c, pt);
-        c.stroke();
-      }
-    }
-    c.fillStyle = o.fill;
-    for (const pt of STUDENT_PARTS) {
-      partPath(c, pt);
-      c.fill();
-    }
-    c.strokeStyle = o.detail;
-    c.lineWidth = 0.012;
-    c.beginPath();
-    c.moveTo(-0.13, -0.79);
-    c.lineTo(0.215, -0.56);
-    c.moveTo(0, -0.77);
-    c.lineTo(0, -0.44);
-    c.stroke();
-    c.restore();
-  }
-  function makeStudentSprite(h, o) {
-    const pad = 40;
-    const x0 = -0.25 * h - pad, x1 = 0.33 * h + pad, y0 = -1.06 * h - pad, y1 = 0.02 * h + pad;
-    const w = Math.ceil(x1 - x0), hh = Math.ceil(y1 - y0);
-    const ax = Math.round(-x0), ay = Math.round(-y0);
-    const cv = sprite(w, hh, (c) => {
-      c.translate(ax, ay);
-      studentBody(c, h, o);
-    });
-    return { cv, ax, ay };
-  }
-  // pass 'tails': streaming tails (drawn behind the body); pass 'wrap': the knot
-  // around the neck (drawn over the body).
-  function drawScarf(ctx, x, footY, h, tau, o, pass) {
+  // Draws the student with feet at (x, footY), height h px.
+  function drawStudent(ctx, x, footY, h, tau, wind, B, rimCol) {
+    const S = studentShapes();
+    const px = 1 / h;
+    const breathe = 1 + 0.004 * Math.sin(tau * 1.7);
     ctx.save();
     ctx.translate(x, footY);
-    ctx.scale(h, h);
+    ctx.scale(h, h * breathe);
     ctx.lineJoin = 'round';
-    const wind = o.wind || 1;
-    if (pass === 'tails') {
-      const paths = [
-        () => scarfTail(ctx, tau, 0.5, 0, -0.815, wind, 0.14),
-        () => scarfTail(ctx, tau + 0.4, 0.34, 2.2, -0.79, wind, 0.38),
-      ];
-      ctx.strokeStyle = C.white;
-      ctx.lineWidth = 10 / h;
-      for (const f of paths) {
-        f();
-        ctx.stroke();
-      }
-      ctx.fillStyle = o.scarf;
-      for (const f of paths) {
-        f();
-        ctx.fill();
-      }
-    } else {
-      ctx.fillStyle = o.scarf;
-      D.polygon(ctx, SCARF_WRAP);
+    ctx.lineCap = 'round';
+    // scarf tails behind the body (knot on the down-wind side of the neck)
+    const tails = [
+      [0.44, 0.0, -0.846, 0.2 + 0.05 * Math.sin(tau * 0.9), 0.046],
+      [0.3, 2.2, -0.826, 0.46 + 0.06 * Math.sin(tau * 1.1 + 1), 0.038],
+    ];
+    ctx.fillStyle = C.red;
+    ctx.strokeStyle = C.black;
+    ctx.lineWidth = 4 * px;
+    for (const tl of tails) {
+      scarfTail(ctx, tau + tl[1] * 0.2, tl[0], tl[1], 0.05, tl[2], wind, tl[3], tl[4]);
       ctx.fill();
-      ctx.strokeStyle = o.fill;
-      ctx.lineWidth = 0.008;
-      ctx.beginPath();
-      ctx.moveTo(-0.07, -0.81);
-      ctx.lineTo(0.07, -0.81);
       ctx.stroke();
     }
+    // red rim light: an outline all round (backlit by the moon) plus a
+    // stronger offset rim on the up-wind side
+    ctx.strokeStyle = rimCol;
+    ctx.lineWidth = 7 * px;
+    ctx.stroke(S.body);
+    ctx.fillStyle = rimCol;
+    ctx.translate(-8 * px * wind, -4 * px);
+    ctx.fill(S.body);
+    ctx.translate(8 * px * wind, 4 * px);
+    ctx.fillStyle = C.black;
+    ctx.fill(S.body);
+    // tailoring details in red
+    ctx.strokeStyle = rimCol;
+    ctx.lineWidth = 3.2 * px;
+    ctx.stroke(S.lines);
+    ctx.fillStyle = rimCol;
+    ctx.fill(S.dots);
+    // scarf wrap + short front end swinging on the beat
+    ctx.fillStyle = C.red;
+    ctx.strokeStyle = C.black;
+    ctx.lineWidth = 4 * px;
+    ctx.save();
+    ctx.scale(wind, 1);
+    scarfTail(ctx, tau * 0.6, 0.15, 1.3, 0.036, -0.81, 1, 1.35 + 0.08 * Math.sin(tau * 2.3) - 0.1 * B.pulse, 0.038);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+    ctx.fill(S.wrap);
+    ctx.stroke(S.wrap);
+    ctx.beginPath();
+    ctx.moveTo(-0.058, -0.818);
+    ctx.lineTo(0.058, -0.818);
+    ctx.stroke();
     ctx.restore();
   }
-  const STUDENT_STYLE = { fill: C.black, detail: C.red, scarf: C.red, outlines: [[C.white, 21], [C.red, 11]] };
 
-  // Crowd rows (back → front). Rows 0–2 are pre-rendered at their exact
-  // on-screen size (unscaled integer blits); row 3 (huge, few) is drawn as paths.
+  // Crowd rows (back → front): depth tint, height, foot line, speed, direction.
   const CROWD_ROWS = [
     { h: 230, foot: 772, v: 34, dir: 1, n: 12, rim: 3, tint: true },
     { h: 370, foot: 862, v: 62, dir: -1, n: 9, rim: 4 },
     { h: 540, foot: 972, v: 100, dir: 1, n: 7, rim: 6 },
     { h: 1060, foot: 1420, v: 420, dir: -1, n: 2, rim: 10, margin: 1400 },
   ];
-  function crowdSprite(h, type, pose, dir, rim, body, rimCol) {
-    const um = type === 3;
-    const x0 = um ? -0.3 : -0.27, x1 = um ? 0.44 : 0.27, y0 = um ? -1.56 : -1.1, y1 = 0.03;
-    const bx0 = dir > 0 ? x0 : -x1, bx1 = dir > 0 ? x1 : -x0;
-    const pad = rim + 3;
-    const w = Math.ceil((bx1 - bx0) * h + pad * 2), hh = Math.ceil((y1 - y0) * h + pad * 2);
-    const ax = Math.round(-bx0 * h + pad), ay = Math.round(-y0 * h + pad);
-    const cv = sprite(w, hh, (c) => {
-      const passes = [[rimCol || C.red, rim, -rim * 0.6], [body || C.black, 0, 0]];
-      for (const ps of passes) {
-        c.save();
-        c.translate(ax + ps[1], ay + ps[2]);
-        c.scale(h * dir, h);
-        c.fillStyle = ps[0];
-        c.strokeStyle = ps[0];
-        walker(c, type, pose);
-        c.restore();
-      }
-    });
-    return { cv, ax, ay };
-  }
+  const CROWD_SKY = {
+    red: { '@body': C.blood, '@w0': C.redDeep, '@w1': C.red },
+    night: { '@body': mix(C.navy, C.night, 0.6), '@w0': mix(C.navy, C.star, 0.3), '@w1': C.redDeep },
+  };
   function buildCrowd() {
-    const K = { rows: [] };
-    for (let r = 1; r < 3; r++) {
-      const row = CROWD_ROWS[r];
-      K.rows[r] = [];
-      for (let type = 0; type < 6; type++) K.rows[r][type] = [0, 1].map((pose) => crowdSprite(row.h, type, pose, row.dir, row.rim));
-    }
-    // far row in solid depth tints (red scheme / night scheme)
-    const row0 = CROWD_ROWS[0];
-    K.farRed = [];
-    K.farNight = [];
-    for (let type = 0; type < 6; type++) {
-      K.farRed[type] = [0, 1].map((pose) => crowdSprite(row0.h, type, pose, row0.dir, row0.rim, C.blood, C.redHot));
-      K.farNight[type] = [0, 1].map((pose) => crowdSprite(row0.h, type, pose, row0.dir, row0.rim, C.night, C.redDeep));
-    }
-    K.moon = makeMoon(330, { moonDisc: C.star, moonDots: C.navy, moonRing: null, moonShadow: C.red });
-    K.student = makeStudentSprite(660, STUDENT_STYLE);
     rampTile('crowd-red');
     rampTile('crowd-night');
-    return K;
+    for (let type = 0; type < 6; type++) for (let pose = 0; pose < 2; pose++) walkerShape(type, pose);
+    studentShapes();
+    return { moon: { red: moonSprite('red', 330), navy: moonSprite('navy', 330) }, far: sharedSkyline('far') };
   }
-  function drawCrowdRow(ctx, K, ri, tau, p, B, I, q, speedK, night) {
+  function drawWalker(ctx, shape, x, y, h, dir, rim, rimCol, body) {
+    ctx.save();
+    ctx.translate(x + rim, y - rim * 0.6);
+    ctx.scale(h * dir, h);
+    ctx.fillStyle = rimCol;
+    ctx.fill(shape);
+    ctx.restore();
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(h * dir, h);
+    ctx.fillStyle = body;
+    ctx.fill(shape);
+    ctx.restore();
+  }
+  function drawCrowdRow(ctx, ri, tau, p, B, I, q, speedK, night) {
     const row = CROWD_ROWS[ri];
     const M = row.margin || 320;
     const span = W + 2 * M;
     const n = ri === 3 ? (I > 0.6 ? 2 : 1) : Math.max(1, Math.round(row.n * (0.55 + 0.6 * I) * (ri < 2 ? q : 1)));
-    const set = row.tint ? (night ? K.farNight : K.farRed) : K.rows[ri];
+    const body = row.tint ? (night ? C.night : C.blood) : C.black;
+    const rimCol = row.tint ? (night ? C.redDeep : C.redHot) : C.red;
     for (let k = 0; k < n; k++) {
       const x0 = (k / n) * span + srand(p.seed, ri * 50 + k, 1) * (span / n) * 0.35;
       const x = mod(x0 + row.dir * row.v * speedK * tau, span) - M;
       const type = Math.floor(rand(p.seed, ri * 50 + k, 2) * 6);
       const pose = (B.index + k + ri) & 1;
-      const bob = pose === 1 ? -Math.round(row.h * 0.012) : 0;
-      if (ri < 3) {
-        const spr = set[type][pose];
-        ctx.drawImage(spr.cv, Math.round(x - spr.ax), Math.round(row.foot + bob - spr.ay));
-      } else {
-        const hh = row.h * (0.92 + 0.16 * rand(p.seed, ri * 50 + k, 3));
-        for (let pass = 0; pass < 2; pass++) {
-          ctx.save();
-          ctx.translate(x + (pass === 0 ? row.rim : 0), row.foot + bob - (pass === 0 ? row.rim * 0.6 : 0));
-          ctx.scale(hh * row.dir, hh);
-          ctx.fillStyle = ctx.strokeStyle = pass === 0 ? C.red : C.black;
-          walker(ctx, type, pose);
-          ctx.restore();
-        }
-      }
+      const hh = row.h * (0.94 + 0.12 * rand(p.seed, ri * 50 + k, 3));
+      const bob = pose === 1 ? -hh * 0.012 : 0;
+      if (x < -0.5 * hh - OV || x > W + OV + 0.5 * hh) continue;
+      drawWalker(ctx, walkerShape(type, pose), Math.round(x), row.foot + bob, hh, row.dir, row.rim, rimCol, body);
     }
   }
   function drawCrowd(ctx, env, p, K) {
@@ -1412,28 +1906,17 @@
     const night = I < 0.5 ? v % 2 === 0 : v % 2 === 1;
     const tau = p.lt * p.speed + rand(p.seed, 1) * 200;
     const px = Math.round(W * 0.5 + srand(p.seed, 5) * 240);
-    const discY = 470;
+    const discY = 470, dr = 330;
     fillAll(ctx, night ? C.navy : C.red);
-    if (!night) {
-      ctx.globalAlpha = 0.9;
-      D.rays(ctx, px, discY, 30, 2400, tau * 0.05, C.redHot);
-      ctx.globalAlpha = 1;
-    }
     if (night) {
       fillRamp(ctx, 'crowd-night', -OV);
       drawDust(ctx, dustList(3301, 200, -OV, W + OV, -OV, 620, 1, 2.4), C.star);
     } else {
       fillRamp(ctx, 'crowd-red', -OV);
     }
-    // spotlight disc (or moon) behind the lone figure
-    const dr = 330;
-    if (night) {
-      ctx.drawImage(K.moon, px - (K.moon.width >> 1), discY - (K.moon.height >> 1));
-    } else {
-      ctx.fillStyle = C.white;
-      circle(ctx, px, discY, dr);
-      ctx.fill();
-    }
+    // concentric jagged shock rings drifting out from the moon (never rays)
+    shockRings(ctx, px, discY, B, p.seed + 7, { color: night ? C.red : C.black, r0: dr + 110, gap: 80, n: 3, kick: 12, amp: 10, tooth: 44, lw: 9, rot: tau * 0.03, alpha: 0.35 + 0.45 * I });
+    // cream halftone moon behind the lone figure, ringed on the bar
     ctx.lineWidth = 12;
     ctx.strokeStyle = night ? C.red : C.black;
     circle(ctx, px, discY, dr + 30 + 16 * B.barPulse);
@@ -1441,17 +1924,24 @@
     ctx.lineWidth = 4;
     circle(ctx, px, discY, dr + 58 + 30 * B.barPulse);
     ctx.stroke();
-    // ground + zebra crossing converging to a vanishing point above the figure
+    drawMoon(ctx, K.moon[night ? 'navy' : 'red'], px, discY);
+    // distant city skyline (shared vector geometry, 0.6 scale, slow drift)
+    ctx.save();
+    ctx.translate(0, 716 - NC.farH * 0.45);
+    ctx.scale(0.45, 0.45);
+    drawStripOps(ctx, K.far, tau * 12, 0, night ? CROWD_SKY.night : CROWD_SKY.red);
+    ctx.restore();
+    // ground + zebra crossing in gentle perspective
     ctx.fillStyle = C.black;
     D.polygon(ctx, [[-OVF, 700], [W + OVF, 716], [W + OVF, H + OVF], [-OVF, H + OVF]]);
     ctx.fill();
-    ctx.fillStyle = night ? C.gray : C.white;
+    ctx.fillStyle = night ? C.gray : C.paper;
     ctx.beginPath();
-    const vx = px, vy = 180;
-    const yT = 740, yB = H + OV;
-    for (let k = -9; k <= 9; k++) {
-      const xb0 = px + k * 280 - 80, xb1 = xb0 + 150;
-      const f = (yT - vy) / (yB - vy);
+    const vx = px + 160, vy = -1400;
+    const yT = 742, yB = H + OV;
+    const f = (yT - vy) / (yB - vy);
+    for (let k = -8; k <= 8; k++) {
+      const xb0 = px + k * 250 - 60, xb1 = xb0 + 130;
       ctx.moveTo(lerp(vx, xb0, f), yT);
       ctx.lineTo(lerp(vx, xb1, f), yT);
       ctx.lineTo(xb1, yB);
@@ -1460,14 +1950,11 @@
     }
     ctx.fill();
     const speedK = 0.6 + 0.8 * I;
-    drawCrowdRow(ctx, K, 0, tau, p, B, I, q, speedK, night);
-    drawCrowdRow(ctx, K, 1, tau, p, B, I, q, speedK, night);
-    drawCrowdRow(ctx, K, 2, tau, p, B, I, q, speedK, night);
-    const so = Object.assign({ wind: srand(p.seed, 8) < 0 ? -1 : 1 }, STUDENT_STYLE);
-    drawScarf(ctx, px, 996, 660, tau, so, 'tails');
-    ctx.drawImage(K.student.cv, px - K.student.ax, 996 - K.student.ay);
-    drawScarf(ctx, px, 996, 660, tau, so, 'wrap');
-    drawCrowdRow(ctx, K, 3, tau, p, B, I, q, speedK, night);
+    drawCrowdRow(ctx, 0, tau, p, B, I, q, speedK, night);
+    drawCrowdRow(ctx, 1, tau, p, B, I, q, speedK, night);
+    drawCrowdRow(ctx, 2, tau, p, B, I, q, speedK, night);
+    drawStudent(ctx, px, 996, 660, tau, srand(p.seed, 8) < 0 ? -1 : 1, B, C.red);
+    drawCrowdRow(ctx, 3, tau, p, B, I, q, speedK, night);
   }
 
   /* ================================================================== */
@@ -1790,84 +2277,142 @@
   }
 
   /* ================================================================== */
-  /* 6. SUNBURST                                                         */
+  /* 6. SUNBURST — "impact burst"                                        */
   /* ================================================================== */
+  // Registered as 'sunburst' (contract name) but deliberately NOT a sun: no
+  // disc, no evenly spaced wedges and never red/white rays. It is a manga
+  // impact panel: irregular red/black focus lines converging on an off-centre
+  // point, concentric jagged shock rings, a halftone shock wave on the downbeat
+  // and a black star-burst carrying the emblem. White only as thin outlines and
+  // small particles.
+  const SB_SCHEMES = [
+    // bg, focus lines, deep lines, rings, halftone wave, ramps, outer burst, burst outline, inner burst, emblem
+    { bg: C.red, line: C.black, deep: C.redDeep, ring: C.black, wave: C.black, ramp: 'k', outer: C.black, edge: C.white, shadow: C.blood, inner: C.redHot, em: { star: C.black, slash: C.white, outline: C.black, gap: C.redHot, lw: 10 }, spark: C.star },
+    { bg: C.black, line: C.red, deep: C.blood, ring: C.red, wave: C.red, ramp: 'r', outer: C.red, edge: C.star, shadow: C.blood, inner: C.black, em: { star: C.red, slash: C.white, outline: C.black, gap: C.black, lw: 10 }, spark: C.star },
+    { bg: C.blood, line: C.black, deep: C.red, ring: C.red, wave: C.black, ramp: 'k', outer: C.black, edge: C.red, shadow: C.ink, inner: C.red, em: { star: C.black, slash: C.white, outline: C.black, gap: C.red, lw: 10 }, spark: C.star },
+  ];
   function buildSunburst() {
-    const K = {};
-    const S = 1200;
-    const radial = (color) => halftoneSprite(S, S, { cell: 22, angle: 0, color, fn: (u, v) => 1.1 * clamp(1 - Math.hypot(u - 0.5, v - 0.5) * 2) });
-    K.coreWhite = radial(C.white);
-    K.coreBlack = radial(C.black);
-    K.coreRed = radial(C.red);
-    return K;
+    for (const k of ['sb-top-k', 'sb-bot-k', 'sb-top-r', 'sb-bot-r']) rampTile(k);
+    return {};
   }
-  function drawSunburst(ctx, env, p, K) {
+  // Tapered focus lines: thin triangles from far outside the frame towards
+  // (cx, cy), stopping at an irregular inner radius (a clear zone around the
+  // focal point). Angles, lengths and widths are all irregular.
+  function focusLines(ctx, cx, cy, n, seed, epoch, rot, rIn, wMax, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    for (let j = 0; j < n; j++) {
+      const e = epoch + (j % 3); // staggered re-draw like hand-inked action lines
+      const a = rot + (j + 0.9 * srand(seed, j, e)) * (TAU / n);
+      const r0 = rIn * (0.85 + 0.9 * Math.pow(rand(seed, j, e + 50), 2));
+      const wd = (2 + wMax * Math.pow(rand(seed, j, e + 90), 1.5)) / 2;
+      const ca = Math.cos(a), sa = Math.sin(a);
+      // end just outside the overscan box (same taper as a 2300 px line)
+      const tx = ca > 1e-6 ? (W + OV + 40 - cx) / ca : ca < -1e-6 ? (-OV - 40 - cx) / ca : 1e9;
+      const ty = sa > 1e-6 ? (H + OV + 40 - cy) / sa : sa < -1e-6 ? (-OV - 40 - cy) / sa : 1e9;
+      const R = Math.min(2300, tx, ty);
+      if (R <= r0) continue;
+      const hw = wd * 3 * ((R - r0) / (2300 - r0));
+      ctx.moveTo(cx + ca * r0, cy + sa * r0);
+      ctx.lineTo(cx + ca * R - sa * hw, cy + sa * R + ca * hw);
+      ctx.lineTo(cx + ca * R + sa * hw, cy + sa * R - ca * hw);
+      ctx.closePath();
+    }
+    ctx.fill();
+  }
+  // A ring of halftone dots expanding from (cx, cy): three staggered circles.
+  function halftoneWave(ctx, cx, cy, r, band, size, color) {
+    if (size < 0.8) return;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    for (let k = -1; k <= 1; k++) {
+      const rr = r + k * band;
+      const s = size * (1 - 0.45 * Math.abs(k));
+      const n = Math.min(120, Math.max(12, Math.round((TAU * rr) / (band * 1.1))));
+      const off = (k & 1) * 0.5;
+      for (let i = 0; i < n; i++) {
+        const a = ((i + off) / n) * TAU;
+        const x = cx + Math.cos(a) * rr, y = cy + Math.sin(a) * rr;
+        ctx.moveTo(x + s, y);
+        ctx.arc(x, y, s, 0, TAU);
+      }
+    }
+    ctx.fill();
+  }
+  function drawSunburst(ctx, env, p) {
     const B = beatOf(env), I = p.intensity, v = p.variant, q = env.quality || 1;
-    const scheme = v % 3;
-    const bg = [C.red, C.black, C.white][scheme];
-    const rayCol = [C.black, C.red, C.red][scheme];
-    const ray2 = [C.redHot, C.blood, C.redDeep][scheme];
-    const core = [K.coreWhite, K.coreRed, K.coreBlack][scheme];
+    const S = SB_SCHEMES[v % 3];
     const tau = p.lt * p.speed + rand(p.seed, 1) * 100;
     const side = rand(p.seed, 2) < 0.5 ? -1 : 1;
-    const cx = Math.round(W * (0.5 + side * (0.2 + 0.08 * rand(p.seed, 7)))), cy = Math.round(H * (0.42 + 0.16 * rand(p.seed, 3)));
-    const nR = 2 * (10 + Math.floor(rand(p.seed, 4) * 6));
-    const step = TAU / nR;
-    const tick = I > 0.45 ? (B.index + E.outBack(clamp(B.sinceBeat / 0.18))) * step * 0.5 : 0;
-    const rot = tau * (0.05 + 0.1 * I) + tick;
-    fillAll(ctx, bg);
-    D.rays(ctx, cx, cy, nR, 2800, rot, rayCol);
-    D.rays(ctx, cx, cy, nR * 3, 2800, -rot * 0.6 + step * 0.25, ray2);
-    // halftone core
-    ctx.drawImage(core, cx - (core.width >> 1), cy - (core.height >> 1));
-    // shock rings (one per beat)
-    ctx.lineJoin = 'miter';
-    for (let k = 0; k < 3; k++) {
-      const age = B.sinceBeat + k * B.period;
-      if (age > 1.3) continue;
-      const r = 240 + age * (1500 + 900 * I);
-      ctx.lineWidth = Math.max(2, 34 * (1 - age / 1.3));
-      ctx.strokeStyle = (B.index - k) % 2 === 0 ? (scheme === 2 ? C.black : C.white) : scheme === 0 ? C.black : C.red;
-      circle(ctx, cx, cy, r);
-      ctx.stroke();
+    const cx = Math.round(W * (0.5 + side * (0.17 + 0.1 * rand(p.seed, 7)))), cy = Math.round(H * (0.4 + 0.18 * rand(p.seed, 3)));
+    const SK = window.__sbSkip || {};
+    fillAll(ctx, S.bg);
+    if (!SK.ramp) fillRamp(ctx, 'sb-top-' + S.ramp, -OV);
+    fillRamp(ctx, 'sb-bot-' + S.ramp, H + OV - RAMPS['sb-bot-k'][1]);
+    // focus lines: a deep-tone layer and the main layer; they re-ink per beat
+    // (per bar when calm) and the clear zone breathes with the pulse
+    const epoch = I > 0.6 ? B.index : B.bar;
+    const breathe = 1 - 0.14 * B.pulse * (0.4 + I);
+    const rot = tau * 0.03 * side;
+    if (!SK.lines) focusLines(ctx, cx, cy, Math.round((12 + 8 * I) * q), p.seed + 5, epoch, rot + 0.07, 540 * breathe, 28, S.deep);
+    if (!SK.lines) focusLines(ctx, cx, cy, Math.round((50 + 42 * I) * q), p.seed, epoch, rot, 430 * breathe, 15, S.line);
+    // concentric jagged shock rings drifting outward over each bar
+    if (!SK.rings) shockRings(ctx, cx, cy, B, p.seed + 3, { color: S.ring, r0: 500, gap: 170, n: 2, kick: 24, amp: 18, tooth: 70, lw: 11, rot: tau * 0.04, alpha: 0.5 + 0.4 * I });
+    // halftone shock wave released on every downbeat
+    const age = B.sinceDownbeat;
+    if (age < 0.9 && !SK.wave) {
+      const k = age / 0.9;
+      halftoneWave(ctx, cx, cy, 300 + E.outCubic(k) * (900 + 500 * I), 26, 11 * (1 - k) * (0.6 + 0.4 * I), S.wave);
     }
-    // particles streaming out
-    if (I > 0.35) {
-      const n = Math.round((20 + 40 * I) * q);
-      ctx.fillStyle = scheme === 2 ? C.black : C.white;
-      ctx.beginPath();
-      for (let j = 0; j < n; j++) {
-        const u0 = tau * (0.35 + 0.5 * rand(p.seed, j, 2)) + rand(p.seed, j, 1);
-        const ep = Math.floor(u0), u = u0 - ep;
-        const a = rand(p.seed, j, ep + 3) * TAU;
-        const r = 260 + u * 1400;
-        const s = 5 + 16 * u * rand(p.seed, j, 5);
-        const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
-        if (j % 3 === 0) {
-          D.star(ctx, x, y, s, s * 0.45, 5, a);
-        } else {
-          ctx.moveTo(x + s, y);
-          ctx.arc(x, y, s * 0.5, 0, TAU);
+    // particles streaming out (small cream sparks + black chips)
+    if (I > 0.35 && !SK.sparks) {
+      const n = Math.round((18 + 36 * I) * q);
+      for (let pass = 0; pass < 2; pass++) {
+        ctx.fillStyle = pass ? C.ink : S.spark;
+        ctx.beginPath();
+        for (let j = pass; j < n; j += 2) {
+          const u0 = tau * (0.35 + 0.5 * rand(p.seed, j, 2)) + rand(p.seed, j, 1);
+          const ep = Math.floor(u0), u = u0 - ep;
+          const a = rand(p.seed, j, ep + 3) * TAU;
+          const r = 300 + u * 1400;
+          const s = 4 + 14 * u * rand(p.seed, j, 5);
+          const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+          if (pass === 0 && j % 4 === 0) {
+            D.sparkle(ctx, x, y, s * 1.4, 0.2, a);
+          } else if (pass === 0) {
+            ctx.moveTo(x + s * 0.45, y);
+            ctx.arc(x, y, s * 0.45, 0, TAU);
+          } else {
+            ctx.moveTo(x + Math.cos(a) * s, y + Math.sin(a) * s);
+            ctx.lineTo(x + Math.cos(a + 2.4) * s * 0.6, y + Math.sin(a + 2.4) * s * 0.6);
+            ctx.lineTo(x + Math.cos(a + 4) * s * 0.7, y + Math.sin(a + 4) * s * 0.7);
+            ctx.closePath();
+          }
         }
+        ctx.fill();
       }
-      ctx.fill();
     }
-    // jagged bursts + emblem
+    // star-burst + emblem (snaps on the downbeat)
     const bp = E.outBack(clamp(B.sinceDownbeat / 0.25));
     const bs = (0.92 + 0.08 * bp) * (1 + 0.05 * B.pulse * I);
-    ctx.fillStyle = scheme === 2 ? C.red : C.black;
-    D.burst(ctx, cx + 14, cy + 14, 250 * bs, 420 * bs, 16, p.seed + 11, 0.3, -tau * 0.2);
+    const br = -tau * 0.2;
+    ctx.lineJoin = 'miter';
+    ctx.fillStyle = S.shadow;
+    D.burst(ctx, cx + 16, cy + 16, 250 * bs, 420 * bs, 16, p.seed + 11, 0.3, br);
     ctx.fill();
-    ctx.fillStyle = scheme === 2 ? C.black : C.black;
-    D.burst(ctx, cx, cy, 250 * bs, 420 * bs, 16, p.seed + 11, 0.3, -tau * 0.2);
+    ctx.fillStyle = S.outer;
+    D.burst(ctx, cx, cy, 250 * bs, 420 * bs, 16, p.seed + 11, 0.3, br);
     ctx.fill();
-    ctx.fillStyle = C.white;
-    D.burst(ctx, cx, cy, 190 * bs, 320 * bs, 13, p.seed + 12, 0.35, tau * 0.25);
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = S.edge;
+    ctx.stroke();
+    ctx.fillStyle = S.inner;
+    D.burst(ctx, cx, cy, 185 * bs, 300 * bs, 12, p.seed + 12, 0.35, tau * 0.25);
     ctx.fill();
     ctx.lineWidth = 10;
-    ctx.strokeStyle = C.black;
+    ctx.strokeStyle = S.outer === C.black ? C.black : C.ink;
     ctx.stroke();
-    drawEmblem(ctx, cx, cy, 150 * bs, srand(p.seed, 6) * 0.25 + 0.06 * Math.sin(tau * 2), { star: C.red, slash: C.white, outline: C.black, gap: C.white, shadow: C.black, lw: 12 });
+    drawEmblem(ctx, cx, cy, 150 * bs, srand(p.seed, 6) * 0.25 + 0.06 * Math.sin(tau * 2), S.em);
   }
 
   /* ================================================================== */
@@ -1946,6 +2491,7 @@
     rampTile('skyred-hz');
     K.cloudsBig = [0, 1, 2].map((i) => makeCloud(880 + i * 60, 330, 900 + i, 9));
     K.cloudsSmall = [0, 1].map((i) => makeCloud(460 + i * 40, 170, 950 + i, 6));
+    K.moon = moonSprite('red', 250);
     K.roofs = makeSkyline({ seed: 7301, w: 2880, h: 360, top: [150, 280], bw: [60, 200], gap: [-4, 6], tower: 0.05, lit: [0.02, 0.1], types: [0, 2, 3, 3, 5, 1], color: C.black, win: { w: 10, h: 12, gx: 12, gy: 14, m: 12, colors: [[C.white, 2], [C.red, 1]], flicker: 0.02 }, board: C.red });
     return K;
   }
@@ -1955,17 +2501,21 @@
     fillAll(ctx, C.red);
     fillRamp(ctx, 'skyred-top', -OV);
     fillRamp(ctx, 'skyred-hz', 640);
-    // big sun disc cut by horizontal slits (variants 1/2)
+    // cream halftone moon rising slowly over the rooftops (variants 1/2):
+    // shaded and cratered, with a black orbit arc — a moon, never a sun disc
     if (v % 3 !== 0) {
-      const sx = Math.round(W * (0.25 + 0.5 * rand(p.seed, 3))), sy = 700;
-      ctx.fillStyle = C.white;
-      circle(ctx, sx, sy, 300 + 8 * B.barPulse);
-      ctx.fill();
-      ctx.fillStyle = C.red;
-      for (let k = 0; k < 6; k++) {
-        const y = sy - 40 + k * 44, th = 6 + k * 4;
-        ctx.fillRect(sx - 320, y, 640, th);
-      }
+      const sx = Math.round(W * (0.25 + 0.5 * rand(p.seed, 3))), sy = Math.round(610 - 50 * clamp(p.lt / p.dur));
+      const orb = tau * 0.1 + 0.2 * E.outBack(clamp(B.sinceDownbeat / 0.3));
+      ctx.strokeStyle = C.black;
+      ctx.lineWidth = 10;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 292 + 10 * B.barPulse, orb, orb + 3.4);
+      ctx.stroke();
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 318 + 16 * B.barPulse, -orb + 2, -orb + 4.4);
+      ctx.stroke();
+      drawMoon(ctx, K.moon, sx, sy);
     }
     // clouds: small/far ones slow, big/near ones faster
     const layers = [[K.cloudsSmall, 3, 12, [40, 260]], [K.cloudsBig, 3, 34, [60, 420]]];
@@ -1998,7 +2548,7 @@
     }
     drawFlocks(ctx, tau, p.seed + 5, I, C.black, [160, 540], [16, 30], q);
     const off = tau * (20 + 30 * I);
-    drawStrip(ctx, K.roofs.canvas, off, 720);
+    drawStripOps(ctx, K.roofs, off, 720);
     drawFlicker(ctx, K.roofs, off, 720, env.t, p.seed, B, I);
     ctx.fillStyle = C.black;
     ctx.fillRect(-OVF, 1079, W + 2 * OVF, OVF);
@@ -2234,6 +2784,7 @@
     }
     c.restore();
   }
+  const SF = { roofH: 700, sky: 600 }; // rooftop strip height; per-frame sky elements stay above y = sky
   function buildStarfield() {
     const K = {};
     const SW = W + OV * 2, SH = H + OV * 2;
@@ -2269,8 +2820,14 @@
         D.sparkle(c, r2.range(0, w), r2.range(0, h * 0.62), r2.range(5, 10), 0.18, 0);
         c.fill();
       }
+      c.save();
+      c.translate(0, h - SF.roofH);
+      paintRooftops(c, w, SF.roofH, 9201);
+      c.restore();
     });
-    K.roofs = sprite(SW, 700, (c, w, h) => paintRooftops(c, w, h, 9201));
+    // The static rooftop silhouette is baked into the sky sprite (one blit per
+    // frame, no second full-width layer); per-frame sky elements stay above it.
+    attributed('starfield', () => 0);
     K.constellations = new Map();
     return K;
   }
@@ -2281,6 +2838,8 @@
     const r = MV.rng(seed);
     const y0 = H + OV - h;
     const Y = (screenY) => screenY - y0;
+    // layers: 0 silhouettes · 1 shop signs · 2 sign details · 3 windows · 4 mullions · 5 pole + wires
+    c.layer = 0;
     c.fillStyle = C.black;
     const peopleX = w * 0.57;
     const wins = [];
@@ -2351,10 +2910,13 @@
         // low shop with a lit sign
         const bw = r.range(160, 240), top = Y(r.range(950, 990));
         c.fillRect(x, top, bw, h - top);
+        c.layer = 1;
         c.fillStyle = r.chance(0.5) ? C.red : C.star;
         c.fillRect(x + 20, top + 16, bw - 40, 22);
+        c.layer = 2;
         c.fillStyle = C.black;
         c.fillRect(x + 30 + (bw - 60) * 0.3, top + 16, 6, 22);
+        c.layer = 0;
         x += bw + r.range(0, 16);
       } else {
         // tree clump
@@ -2368,12 +2930,15 @@
       }
     }
     for (const wv of wins) {
+      c.layer = 3;
       c.fillStyle = r.chance(0.2) ? C.red : r.chance(0.5) ? C.yellow : C.star;
       c.fillRect(Math.round(wv[0]), Math.round(wv[1]), 18, 22);
+      c.layer = 4;
       c.fillStyle = C.black;
       c.fillRect(Math.round(wv[0]) + 8, Math.round(wv[1]), 2, 22);
     }
     // utility pole + sagging wires across the frame
+    c.layer = 5;
     c.fillStyle = C.black;
     const px = w * 0.17, ptop = Y(620);
     poleShape(c, px, ptop, h, 0.85);
@@ -2419,11 +2984,17 @@
   function drawStarfield(ctx, env, p, K) {
     const B = beatOf(env), I = p.intensity, q = env.quality || 1;
     const tau = p.lt * p.speed + rand(p.seed, 1) * 100;
-    ctx.drawImage(K.sky, -OV, -OV);
+    // sky + rooftops, with a very slow sideways drift
+    const sx = -OV + Math.round(10 * Math.sin(tau * 0.05)), sr = sx + K.sky.width;
+    ctx.drawImage(K.sky, sx, -OV);
     ctx.fillStyle = C.night;
     ctx.fillRect(-OVF, -OVF, W + 2 * OVF, OVF - OV);
-    ctx.fillRect(-OVF, -OV, OVF - OV, H + 2 * OV);
-    ctx.fillRect(W + OV, -OV, OVF - OV, H + 2 * OV);
+    ctx.fillRect(-OVF, -OV, sx + OVF, 1000 + OV);
+    ctx.fillRect(sr, -OV, W + OVF - sr, 1000 + OV);
+    ctx.fillStyle = C.black;
+    ctx.fillRect(-OVF, 1000, sx + OVF, H + OVF);
+    ctx.fillRect(sr, 1000, W + OVF - sr, H + OVF);
+    ctx.fillRect(-OVF, H + OV - 1, W + 2 * OVF, OVF);
     // mid-layer stars drifting slowly (parallax), twinkling
     const drift = tau * 5;
     const nM = Math.round(170 * q);
@@ -2431,7 +3002,7 @@
     ctx.beginPath();
     for (let k = 0; k < nM; k++) {
       const x = mod(rand(9301, k, 1) * (W + 400) - drift, W + 400) - 200;
-      const y = rand(9301, k, 2) * 760 - 60;
+      const y = rand(9301, k, 2) * (SF.sky + 60) - 60;
       const tw = 0.6 + 0.4 * Math.sin(tau * (1 + 2 * rand(9301, k, 3)) + k);
       const s = (1.6 + 2.4 * rand(9301, k, 4)) * tw;
       ctx.rect(x - s / 2, y - s / 2, s, s);
@@ -2441,7 +3012,7 @@
     const nSp = Math.round(28 * (0.7 + 0.3 * q));
     const sp = [];
     for (let k = 0; k < nSp; k++) {
-      const x = rand(p.seed + 3, k, 1) * W, y = 30 + rand(p.seed + 3, k, 2) * 640;
+      const x = rand(p.seed + 3, k, 1) * W, y = 30 + rand(p.seed + 3, k, 2) * (SF.sky - 40);
       const tw = 0.5 + 0.5 * Math.sin(tau * (0.8 + 1.6 * rand(p.seed, k, 3)) + k * 2.1);
       const pop = mod(k + B.index, 6) === 0 ? B.pulse * (0.25 + 0.9 * I) : 0;
       const s = (7 + 20 * Math.pow(rand(p.seed + 3, k, 4), 2)) * (0.45 + 0.55 * tw + pop);
@@ -2514,6 +3085,9 @@
         const x0 = 300 + rand(p.seed, sl, id + 5) * (W + 200), y0 = -40 + rand(p.seed, sl, id + 6) * 360;
         const dist = 700 + 500 * I;
         const hx = x0 + Math.cos(ang) * dist * age, hy = y0 + Math.sin(ang) * dist * age;
+        // burns out before reaching the rooftops (they are baked into the sky)
+        const fade = clamp((SF.sky + 10 - hy) / 150);
+        if (fade <= 0) continue;
         const tail = (200 + 280 * I) * Math.min(1, age * 3) * (1 - age * 0.6);
         const nx = -Math.sin(ang), ny = Math.cos(ang);
         const wd = 4;
@@ -2523,7 +3097,7 @@
           const ax = hx - Math.cos(ang) * tail * f0, ay = hy - Math.sin(ang) * tail * f0;
           const bx = hx - Math.cos(ang) * tail * f1, by = hy - Math.sin(ang) * tail * f1;
           const w0 = wd * (1 - f0), w1 = wd * (1 - f1);
-          ctx.fillStyle = rgba(C.star, (0.95 - seg * 0.3) * (1 - age * 0.6));
+          ctx.fillStyle = rgba(C.star, (0.95 - seg * 0.3) * (1 - age * 0.6) * fade);
           ctx.beginPath();
           ctx.moveTo(ax + nx * w0, ay + ny * w0);
           ctx.lineTo(ax - nx * w0, ay - ny * w0);
@@ -2533,16 +3107,12 @@
           ctx.fill();
         }
         ctx.fillStyle = C.white;
+        ctx.globalAlpha = fade;
         D.sparkle(ctx, hx, hy, 14 * (1 - age * 0.5), 0.18, 0);
         ctx.fill();
+        ctx.globalAlpha = 1;
       }
     }
-    // rooftops (very slow drift)
-    ctx.drawImage(K.roofs, -OV + Math.round(10 * Math.sin(tau * 0.05)), H + OV - K.roofs.height);
-    ctx.fillStyle = C.black;
-    ctx.fillRect(-OVF, H + OV - 1, W + 2 * OVF, OVF);
-    ctx.fillRect(-OVF, 1000, OVF - OV + 12, H + OV);
-    ctx.fillRect(W + OV - 12, 1000, OVF - OV + 12, H + OV);
   }
 
   /* ================================================================== */

@@ -94,13 +94,13 @@
     <label>种子 Seed <input id="seed" type="number" min="0" step="1" style="width:70px"></label>
     <label>背景 BG <select id="bg"></select></label>
     <span class="post">
-      <label>rgbShift <input id="pp-rgbShift" type="range" min="0" max="30" step="0.5" value="0" style="width:90px"></label>
+      <label>rgbShift (红色错位 red ghost) <input id="pp-rgbShift" type="range" min="0" max="30" step="0.5" value="0" style="width:90px"></label>
       <label>glitch <input id="pp-glitch" type="range" min="0" max="1" step="0.01" value="0" style="width:90px"></label>
       <label>grain <input id="pp-grain" type="range" min="0" max="1" step="0.01" value="0" style="width:90px"></label>
       <label>vignette <input id="pp-vignette" type="range" min="0" max="1" step="0.01" value="0" style="width:90px"></label>
       <label>flash <input id="pp-flash" type="range" min="0" max="1" step="0.01" value="0" style="width:90px"></label>
       <label>redFlash <input id="pp-redFlash" type="range" min="0" max="1" step="0.01" value="0" style="width:90px"></label>
-      <label>invert <input id="pp-invert" type="range" min="0" max="1" step="0.01" value="0" style="width:90px"></label>
+      <label>invert (色板反相) <input id="pp-invert" type="range" min="0" max="1" step="0.01" value="0" style="width:90px"></label>
       <label>scanlines <input id="pp-scanlines" type="range" min="0" max="1" step="0.01" value="0" style="width:90px"></label>
       <label>tier <select id="tier"><option>webgl2</option><option>webgl1</option><option>2d</option></select></label>
     </span>
@@ -123,7 +123,8 @@
 /*
  * FX / Post dev page. URL params: kind=transition|effect|hud|post  name=…  p=0.5  seed=7  bg=scene:<name>@t | stub-a | stub-b  ui=0
  * Test API window.devFx = { ready, transitions, effects, renderTransition(o), renderEffect(o), renderHUD(o),
- *   sheet(o), postRender(o), postShot(tier), perf(o), perfPost(o), hash(o), hudBounds(o), frame(o) }.
+ *   sheet(o), postRender(o), postShot(tier), perf(o), perfPost(o), hash(o), hudBounds(o), frame(o),
+ *   palette(o) → off-palette pixel counts (+ ref = source frames), raysScore(o, cx, cy) → { score, ref } }.
  * performance.now() is only used by the dev timing helpers, never inside fx/post drawing.
  */
 (function () {
@@ -264,6 +265,16 @@
     else if (o.type === 'effect') drawEffect(c2, o);
     else if (o.type === 'hud') drawHUD(c2, o);
     else if (o.type === 'bg') { prepCtx(c2); c2.drawImage(bgFrame(o.bg), 0, 0, W, H); }
+    else if (o.type === 'rays-test') {
+      // known-bad reference for the rays guard (never used by the engine)
+      prepCtx(c2);
+      c2.fillStyle = '#FFFFFF';
+      c2.fillRect(0, 0, W, H);
+      MV.draw.rays(c2, W / 2 + (o.dx || 0), H / 2, o.count || 32, 2400, o.rot || 0, MV.C.red);
+      c2.beginPath();
+      c2.arc(W / 2 + (o.dx || 0), H / 2, 170, 0, MV.TAU);
+      c2.fill();
+    }
   }
   function renderTransition(o) { drawTransition(ctx, o); return true; }
   function renderEffect(o) { drawEffect(ctx, o); return true; }
@@ -415,6 +426,127 @@
     }
     return h.toString(16);
   }
+  /* ---------- palette audit: pixels far outside red / black / white / navy / cream ---------- */
+  // cyan = strong G+B with little R (e.g. an inverted red), magenta = strong R+B with little G,
+  // green = G well above both. Counted on every 2nd pixel of every 2nd row.
+  function countOff(d) {
+    let cyan = 0, magenta = 0, green = 0;
+    for (let i = 0; i < d.length; i += 8) {
+      const r = d[i], g = d[i + 1], b = d[i + 2];
+      if (g > 110 && b > 110 && r < Math.min(g, b) - 60) cyan++;
+      else if (r > 110 && b > 110 && g < Math.min(r, b) - 60) magenta++;
+      else if (g > 110 && g > r + 50 && g > b + 50) green++;
+    }
+    return { cyan, magenta, green };
+  }
+  let palCanvas = null;
+  function palCtx() {
+    if (!palCanvas) {
+      const c = document.createElement('canvas');
+      c.width = W;
+      c.height = H;
+      palCanvas = c.getContext('2d', { willReadFrequently: true });
+    }
+    return palCanvas;
+  }
+  /** Off-palette pixel counts of a rendered frame (o as for frame()), or of a Post output (o.post = { tier, bg, params }). */
+  function palette(o) {
+    const c2 = palCtx();
+    if (o.post) {
+      postRender(o.post);
+      c2.setTransform(1, 0, 0, 1, 0, 0);
+      c2.drawImage(postFor(o.post.tier || 'webgl2').canvas, 0, 0, W, H);
+    } else drawAny(c2, o);
+    const d = c2.getImageData(0, 0, W, H).data;
+    const out = countOff(d);
+    // background reference (what the frame(s) already contained)
+    if (o.post || o.type === 'effect' || o.type === 'bg') {
+      c2.setTransform(1, 0, 0, 1, 0, 0);
+      c2.drawImage(bgFrame(o.post ? o.post.bg || DEF_TO : o.bg || DEF_FROM), 0, 0, W, H);
+      out.ref = countOff(c2.getImageData(0, 0, W, H).data);
+    } else if (o.type === 'transition') {
+      c2.setTransform(1, 0, 0, 1, 0, 0);
+      c2.drawImage(bgFrame(o.from || DEF_FROM), 0, 0, W, H);
+      const a = countOff(c2.getImageData(0, 0, W, H).data);
+      c2.drawImage(bgFrame(o.to || DEF_TO), 0, 0, W, H);
+      const b = countOff(c2.getImageData(0, 0, W, H).data);
+      out.ref = { cyan: Math.max(a.cyan, b.cyan), magenta: Math.max(a.magenta, b.magenta), green: Math.max(a.green, b.green) };
+    }
+    return out;
+  }
+
+  /**
+   * "Rising-sun" guard. Rays are radial, so an angle bin only gets a colour when
+   * its 25 px-averaged colour is that class at ≥ 3 of 4 radii (260..680 px) around
+   * a centre — halftone fields, hairline speed lines, small stars and rings never
+   * qualify; broad wedges do. `type: 'rays-test'` draws a known-bad reference
+   * (32 red/white wedges round a red disc) so the harness can prove the guard bites. Along the bins, count white runs
+   * sitting directly between red runs (or red between white), i.e. red/white
+   * alternating wedges. A black keyline between red and white breaks the pattern.
+   * Centres: a 3×3 grid around the frame centre (±260, ±120) plus (cx, cy).
+   * Returns { score, ref } — ref = the same score of the source frame(s).
+   */
+  function raysOf(d, centres) {
+    // colour class of the 25×25 px neighbourhood mean (halftone dots / hairlines average out)
+    const cls = (x, y) => {
+      x = Math.round(x);
+      y = Math.round(y);
+      if (x < 12 || y < 12 || x >= W - 12 || y >= H - 12) return 0;
+      let r = 0, g = 0, b = 0;
+      for (let oy = -12; oy <= 12; oy += 6) {
+        for (let ox = -12; ox <= 12; ox += 6) {
+          const i = ((y + oy) * W + x + ox) * 4;
+          r += d[i];
+          g += d[i + 1];
+          b += d[i + 2];
+        }
+      }
+      r /= 25;
+      g /= 25;
+      b /= 25;
+      if (r > 170 && g < 80 && b < 90) return 1; // red
+      if (r > 205 && g > 205 && b > 190) return 2; // white / cream
+      if (r < 60 && g < 60 && b < 60) return 3; // black
+      return 4; // anything else (navy, dark red, anti-aliasing …)
+    };
+    const BINS = 720, RADII = [260, 380, 520, 680];
+    let best = 0;
+    for (const c of centres) {
+      const seq = [];
+      for (let k = 0; k < BINS; k++) {
+        const a = (k / BINS) * TAU_, ca = Math.cos(a), sa = Math.sin(a);
+        const n = [0, 0, 0, 0, 0];
+        for (const R of RADII) n[cls(c[0] + ca * R, c[1] + sa * R)]++;
+        let cl = 0;
+        for (let q = 1; q <= 4; q++) if (n[q] >= 3) cl = q;
+        if (cl && (!seq.length || seq[seq.length - 1] !== cl)) seq.push(cl);
+      }
+      let cnt = 0;
+      for (let k = 1; k + 1 < seq.length; k++) {
+        if ((seq[k] === 2 && seq[k - 1] === 1 && seq[k + 1] === 1) || (seq[k] === 1 && seq[k - 1] === 2 && seq[k + 1] === 2)) cnt++;
+      }
+      best = Math.max(best, cnt);
+    }
+    return best;
+  }
+  function raysScore(o, cx, cy) {
+    const c2 = palCtx();
+    const centres = [];
+    for (const dx of [-260, 0, 260]) for (const dy of [-120, 0, 120]) centres.push([W / 2 + dx, H / 2 + dy]);
+    if (cx != null && cy != null) centres.push([+cx, +cy]);
+    drawAny(c2, o);
+    const score = raysOf(c2.getImageData(0, 0, W, H).data, centres);
+    let ref = 0;
+    const refBgs = o.type === 'transition' ? [o.from || DEF_FROM, o.to || DEF_TO] : [o.bg || DEF_FROM];
+    for (const bg of refBgs) {
+      c2.setTransform(1, 0, 0, 1, 0, 0);
+      c2.drawImage(bgFrame(bg), 0, 0, W, H);
+      ref = Math.max(ref, raysOf(c2.getImageData(0, 0, W, H).data, centres));
+    }
+    return { score, ref };
+  }
+  const TAU_ = Math.PI * 2;
+
   // HUD bounds: draw on a transparent canvas, count painted pixels outside the two zones.
   function hudBounds(o) {
     const c = document.createElement('canvas');
@@ -495,7 +627,7 @@
 
   const api = {
     ready: false, transitions: TR, effects: FXN, scenes: sceneNames, BGS, DEF_FROM, DEF_TO,
-    renderTransition, renderEffect, renderHUD, frame, sheet, postRender, postShot, postSheet, perf, perfPost, hash, hudBounds,
+    renderTransition, renderEffect, renderHUD, frame, sheet, postRender, postShot, postSheet, perf, perfPost, hash, hudBounds, palette, raysScore,
     effectDuration: (n) => MV.effects.get(n).duration, transitionDuration: (n) => MV.transitions.get(n).duration,
     layers: () => Object.fromEntries(FXN.map((n) => [n, MV.effects.get(n).layer])),
     fontsOK: false,

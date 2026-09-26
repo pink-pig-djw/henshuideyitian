@@ -19,7 +19,7 @@
  *
  * Accent fields read by effects (a = { kind, t, dur, strength, seed, x?, y?, text?, data? }):
  *   flash      data.color 'white' | 'red' (also a.color)
- *   speedlines x, y = focus (default centre); data.color 'white' | 'black' | 'red'
+ *   speedlines x, y = focus (default centre); data.color 'black' (default) | 'white' | 'red'
  *   ink        x, y (default seeded); data.color 'black' | 'red'; data.size (×)
  *   stars      x, y (default centre)
  *   shards     data.dir ±1 (default seeded)
@@ -1051,7 +1051,11 @@
     }
   });
 
-  /* ---- glitch-cut: slice displacement + channel split between frames -- */
+  /* ---- glitch-cut: slice displacement + red misregistration between frames
+   * Palette-safe: slices are offset copies of either frame, "ghost" slices add
+   * a red-tinted offset copy (P5 misregistration) + a faint white ghost, and
+   * block slices are red / black duotones, red washes, halftone or solid slabs.
+   * Nothing inverts hue (no cyan) and there is no RGB channel split. */
   let scratch = null;
   function getScratch() {
     if (!scratch) scratch = MV.makeCanvas(W, 240);
@@ -1061,6 +1065,7 @@
     if (!src || !src.width) {
       ctx.fillStyle = C.black;
       ctx.fillRect(dx, y, W, h);
+      if (dx) ctx.fillRect(dx > 0 ? dx - W : dx + W, y, W, h);
       return;
     }
     const ky = src.height / H;
@@ -1068,31 +1073,49 @@
     if (dx > 0) ctx.drawImage(src, 0, y * ky, src.width, h * ky, dx - W, y, W, h);
     else if (dx < 0) ctx.drawImage(src, 0, y * ky, src.width, h * ky, dx + W, y, W, h);
   }
-  // Red channel shifted by dx, green/blue in place (for a band of height h ≤ 240).
-  function channelSplit(ctx, src, y, h, dx) {
-    if (!src || !src.width) return;
-    const s = getScratch();
-    const ky = src.height / H;
+  // Band of height h ≤ 240: the slice, a red-tinted copy offset by dx behind its
+  // bright shapes ('lighten' → only where the band is darker) and a faint white ghost.
+  function redGhostSlice(ctx, src, y, h, dx) {
     h = Math.min(h, 240);
-    const pass = (color, off, op) => {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(-60, y, W + 120, h);
+    ctx.clip();
+    sliceFrom(ctx, src, y, h, Math.round(dx * 0.12));
+    if (src && src.width) {
+      const s = getScratch();
+      const ky = src.height / H;
       s.ctx.globalCompositeOperation = 'copy';
       s.ctx.drawImage(src, 0, y * ky, src.width, h * ky, 0, 0, W, h);
       s.ctx.globalCompositeOperation = 'multiply';
-      s.ctx.fillStyle = color;
+      s.ctx.fillStyle = C.red;
       s.ctx.fillRect(0, 0, W, h);
-      ctx.globalCompositeOperation = op;
-      ctx.drawImage(s.canvas, 0, 0, W, h, off, y, W, h);
-    };
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, y, W, h);
-    ctx.clip();
-    ctx.fillStyle = C.ink;
-    ctx.fillRect(0, y, W, h);
-    pass('#00FFFF', 0, 'lighter');
-    pass('#FF0000', dx, 'lighter');
+      s.ctx.globalCompositeOperation = 'source-over';
+      ctx.globalCompositeOperation = 'lighten';
+      ctx.drawImage(s.canvas, 0, 0, W, h, dx, y, W, h);
+      ctx.globalAlpha = 0.3;
+      ctx.drawImage(src, 0, y * ky, src.width, h * ky, -dx * 0.45, y, W, h);
+    }
     ctx.restore();
-    s.ctx.globalCompositeOperation = 'source-over';
+  }
+  // Palette-safe block treatment of a band that is already painted.
+  function paletteBlock(ctx, y, h, kind) {
+    ctx.save();
+    if (kind < 0.34) {
+      ctx.globalCompositeOperation = 'multiply'; // lights → red, darks stay: red / black duotone
+      fillBand(ctx, y, h, C.red);
+    } else if (kind < 0.67) {
+      ctx.globalCompositeOperation = 'lighten'; // darks → red, whites stay: red wash
+      fillBand(ctx, y, h, C.red);
+    } else {
+      fillBand(ctx, y, h, C.red); // halftone slab
+      fillBand(ctx, y, h, tonePattern(ctx, 14, 8, C.black));
+    }
+    ctx.restore();
+  }
+  function fillBand(ctx, y, h, style) {
+    ctx.fillStyle = style;
+    ctx.fillRect(-60, y, W + 120, h);
   }
   regT('glitch-cut', 0.3, (ctx, from, to, p, env, seed) => {
     const steps = 9;
@@ -1103,7 +1126,7 @@
     paint(ctx, base);
     const ss = MV.hash32(seed, step);
     const n = 4 + Math.floor(rnd(ss, 1) * 4 * amp);
-    let splits = 0;
+    let ghosts = 0;
     for (let i = 0; i < n; i++) {
       const h = 10 + rnd(ss, i, 2) * 150 * (0.4 + amp);
       const y = rnd(ss, i, 3) * (H - h);
@@ -1111,18 +1134,11 @@
       const useOther = rnd(ss, i, 5) < 0.45 + 0.3 * amp;
       const src = useOther ? other : base;
       const mode = rnd(ss, i, 6);
-      if (mode < 0.22 * amp + 0.08 && splits++ < 1) channelSplit(ctx, src, y, Math.min(h, 110), dx * 0.25 + 18);
+      if (mode < 0.3 * amp + 0.12 && ghosts++ < 2) redGhostSlice(ctx, src, y, Math.min(h, 140), (dx > 0 ? 1 : -1) * (14 + 26 * amp));
       else sliceFrom(ctx, src, y, h, dx);
-      if (mode > 0.86) {
-        // inverted slice
-        ctx.save();
-        ctx.globalCompositeOperation = 'difference';
-        ctx.fillStyle = C.white;
-        ctx.fillRect(0, y, W, h);
-        ctx.restore();
-      }
+      if (mode > 0.84) paletteBlock(ctx, y, Math.min(h, 90), rnd(ss, i, 13));
     }
-    // solid glitch blocks and thin tear lines
+    // solid glitch slabs and thin tear lines
     const nb = Math.floor(3 + 7 * amp);
     for (let i = 0; i < nb; i++) {
       const bw = 40 + rnd(ss, i, 7) * 420, bh = 6 + rnd(ss, i, 8) * 34;
@@ -1135,21 +1151,37 @@
     for (let i = 0; i < 3; i++) ctx.fillRect(0, rnd(ss, i, 12) * H, W, 2);
   });
 
-  /* ---- zoom-punch: old frame punches in and whites out --------------- */
-  function speedWedges(ctx, fx, fy, inner, count, seed, color, width) {
-    ctx.fillStyle = color;
-    ctx.beginPath();
+  /* ---- zoom-punch: old frame punches in, dims and whites out ---------
+   * Culturally safe by construction: speed lines are black / red (never
+   * red-and-white wedges), the old frame dims to ink before the halftone
+   * white-out closes on it, and the new frame is revealed by a diagonal
+   * halftone sweep (no centred disc on white). */
+  /**
+   * Manga speed lines (thin tapered wedges) converging on (fx, fy). With `edge`
+   * the line is an `edge`-coloured wedge carrying a thinner `color` core, so a
+   * light line always reads as a black stroke with a white glint (never a bare
+   * white wedge against red).
+   */
+  function speedWedges(ctx, fx, fy, inner, count, seed, color, width, edge) {
     const outer = DIAG;
-    for (let i = 0; i < count; i++) {
-      const a = (i / count) * TAU + srnd(seed, i, 1) * (TAU / count) * 0.45;
-      const w = (width || 0.012) * (0.4 + rnd(seed, i, 2));
-      const r0 = inner * (0.85 + 0.5 * rnd(seed, i, 3));
-      ctx.moveTo(fx + Math.cos(a) * r0, fy + Math.sin(a) * r0);
-      ctx.lineTo(fx + Math.cos(a - w) * outer, fy + Math.sin(a - w) * outer);
-      ctx.lineTo(fx + Math.cos(a + w) * outer, fy + Math.sin(a + w) * outer);
-      ctx.closePath();
-    }
-    ctx.fill();
+    const pass = (k, style) => {
+      ctx.fillStyle = style;
+      ctx.beginPath();
+      for (let i = 0; i < count; i++) {
+        const a = (i / count) * TAU + srnd(seed, i, 1) * (TAU / count) * 0.45;
+        const w = (width || 0.012) * (0.4 + rnd(seed, i, 2)) * k;
+        const r0 = inner * (0.85 + 0.5 * rnd(seed, i, 3)) * (k < 1 ? 1.06 : 1);
+        ctx.moveTo(fx + Math.cos(a) * r0, fy + Math.sin(a) * r0);
+        ctx.lineTo(fx + Math.cos(a - w) * outer, fy + Math.sin(a - w) * outer);
+        ctx.lineTo(fx + Math.cos(a + w) * outer, fy + Math.sin(a + w) * outer);
+        ctx.closePath();
+      }
+      ctx.fill();
+    };
+    if (edge) {
+      pass(1.35, edge);
+      pass(0.5, color);
+    } else pass(1, color);
   }
   regT('zoom-punch', 0.45, (ctx, from, to, p, env, seed) => {
     const fx = W / 2 + srnd(seed, 1) * 260, fy = H / 2 + srnd(seed, 2) * 120;
@@ -1163,7 +1195,6 @@
       ctx.restore();
     };
     const dmax = Math.max(Math.hypot(fx, fy), Math.hypot(W - fx, fy), Math.hypot(fx, H - fy), Math.hypot(W - fx, H - fy));
-    const radial = (cell, color, tone) => toneField(ctx, { kind: 'radial', cx: fx, cy: fy, cell, color, tone, levels: 8 });
     if (p < SW) {
       const u = p / SW;
       const s = 1 + 0.75 * E.inCubic(u);
@@ -1174,19 +1205,48 @@
         zoomed(from, s * 1.1);
         ctx.globalAlpha = 1;
       }
-      speedWedges(ctx, fx, fy, lerp(DIAG * 0.7, 180, E.outCubic(u)), 70, seed + Math.floor(u * 8), C.white, 0.012);
-      // white-out as halftone: dots swell in from the edges until the frame is white
+      // the old frame sinks into ink as it punches in
+      const dim = 0.82 * E.inQuad(seg(u, 0.3, 0.92));
+      if (dim > 0) {
+        ctx.globalAlpha = dim;
+        fillAll(ctx, C.ink);
+        ctx.globalAlpha = 1;
+      }
+      // black / red manga speed lines converging on the focus (the red ones
+      // bow out as the white-out arrives, so red never alternates with white)
       const a = E.inQuad(seg(u, 0.25, 1));
-      if (a > 0) radial(30, C.white, (d) => (a * 2.1 - (1 - d / dmax) * 1.1) * 1.02);
+      const inner = lerp(DIAG * 0.7, 190, E.outCubic(u));
+      const ls = seed + Math.floor(u * 8);
+      const redA = clamp(1 - a * 6);
+      if (redA > 0) {
+        ctx.globalAlpha = redA;
+        speedWedges(ctx, fx, fy, inner * 1.08, 24, MV.hash32(ls, 3), C.red, 0.02);
+        ctx.globalAlpha = 1;
+      }
+      speedWedges(ctx, fx, fy, inner, 66, ls, C.black, 0.012);
+      // white-out as halftone: dots swell in from the edges until the frame is white
+      if (a > 0) toneField(ctx, { kind: 'radial', cx: fx, cy: fy, cell: 30, color: C.white, levels: 8, tone: (d) => (a * 2.1 - (1 - d / dmax) * 1.1) * 1.02 });
       return;
     }
     const v = seg(p, SW, 1);
     zoomed(to, 1 + 0.16 * (1 - E.outCubic(v)));
-    // red halftone shock ring from the focus
-    dotRing(ctx, fx, fy, lerp(60, dmax * 1.05, E.outCubic(v)), 200 * (1 - v) + 40, 24, C.red, 1 - v * 0.5);
-    // white dots shrink away from the focus outwards
+    // black jagged shock outline (red inner keyline) racing out from the focus
+    const r = lerp(90, dmax * 1.15, E.outCubic(v));
+    const lw = 26 * (1 - v) + 4;
+    ctx.lineJoin = 'miter';
+    ctx.miterLimit = 6;
+    MV.draw.burst(ctx, fx, fy, r * 0.8, r, 13, seed + 5, 0.22, v * 0.3);
+    ctx.lineWidth = lw;
+    ctx.strokeStyle = C.black;
+    ctx.stroke();
+    MV.draw.burst(ctx, fx, fy, r * 0.8 - lw * 0.9, r - lw * 0.9, 13, seed + 5, 0.22, v * 0.3);
+    ctx.lineWidth = lw * 0.35;
+    ctx.strokeStyle = C.red;
+    ctx.stroke();
+    // white dots recede along a diagonal
+    const ax = linAxis((rnd(seed, 6) < 0.5 ? 45 : 225) * DEG);
     const b = E.outQuad(v);
-    if (b < 1) radial(30, C.white, (d) => (1 - (b * 2.1 - (d / dmax) * 1.1)) * 1.02);
+    if (b < 1) toneField(ctx, { kind: 'linear', ang: ax.ang, cell: 30, color: C.white, tone: (q) => (1 - (b * 1.8 - ax.norm(q) * 0.8)) * 1.02 });
   });
 
   /* ================================================================== */
@@ -1240,19 +1300,25 @@
     toneField(ctx, { kind: 'linear', ang: ax.ang, cell: 30, color: col, tone: (v) => (1 - (u * 1.7 - ax.norm(v) * 0.7)) * 1.02 });
   });
 
-  /* ---- speedlines: manga radial lines around a focus point ------------ */
+  /* ---- speedlines: manga radial lines around a focus point ------------
+   * Thin irregular lines with an empty centre. Default black; heavier accent
+   * lines are red for black lines, black for red lines; light lines are drawn
+   * as black strokes with a white core — never red-and-white rays. */
   regE('speedlines', 'under', 0.6, (ctx, env, a, lt, dur, q, s, seed) => {
     const fx = a.x != null ? +a.x : W / 2, fy = a.y != null ? +a.y : H / 2;
-    const col = colorOf(a, 'white');
+    const col = colorOf(a, 'black');
     const i = E.outExpo(ein(lt, 0.12));
     const o = eout(lt, dur, 0.18);
     const frame = Math.floor(lt * 24); // lines re-roll 24× per second
     const inner = lerp(DIAG * 0.6, 330, i) + 380 * E.inQuad(o);
     const count = Math.round(90 * Math.min(1.4, s));
     ctx.globalAlpha = clamp(s) * (1 - o * 0.6);
-    speedWedges(ctx, fx, fy, inner, count, MV.hash32(seed, frame), col, 0.009);
-    // a few heavier accent lines in red
-    speedWedges(ctx, fx, fy, inner * 1.15, 10, MV.hash32(seed, frame, 7), col === C.red ? C.black : C.red, 0.016);
+    // light lines = black stroke + white core, so they never sit on red as red/white rays
+    const light = col === C.white || col === C.star || col === C.paper;
+    speedWedges(ctx, fx, fy, inner, count, MV.hash32(seed, frame), col, 0.009, light ? C.ink : null);
+    // a few heavier accent lines (black ↔ red; light lines stay light)
+    const acc = col === C.red ? C.black : light ? col : C.red;
+    speedWedges(ctx, fx, fy, inner * 1.15, 10, MV.hash32(seed, frame, 7), acc, 0.016, light ? C.ink : null);
   });
 
   /* ---- ink: splat that blooms, then drips ----------------------------- */
@@ -1304,17 +1370,21 @@
     const fly = E.outExpo(clamp(lt / (dur * 0.55)));
     const out = eout(lt, dur, dur * 0.3);
     const beat = beatOf(env);
-    // central pop
+    // central pop: red jagged burst, black keyline, black core (red / black only)
     if (lt < 0.16) {
       const u = lt / 0.16;
-      ctx.fillStyle = C.white;
+      ctx.lineJoin = 'miter';
       MV.draw.burst(ctx, x, y, 50 + 60 * u, 140 + 120 * u, 12, seed, 0.35, u * 0.5);
+      ctx.fillStyle = C.red;
       ctx.fill();
-      ctx.lineWidth = 8;
-      ctx.strokeStyle = C.red;
+      ctx.lineWidth = 9;
+      ctx.strokeStyle = C.black;
       ctx.stroke();
+      MV.draw.burst(ctx, x, y, 24 + 30 * u, 62 + 50 * u, 9, seed + 3, 0.3, -u * 0.4);
+      ctx.fillStyle = C.black;
+      ctx.fill();
     }
-    const cols = [C.white, C.red, C.star, C.white, C.yellow];
+    const cols = [C.white, C.red, C.star, C.white, C.star];
     ctx.lineJoin = 'miter';
     for (let i = 0; i < n; i++) {
       const ang = (i / n) * TAU + srnd(seed, i, 1) * 0.3;
@@ -1445,14 +1515,15 @@
     const col = colorOf(a, 'red');
     const e = E.outQuart(q);
     const r = lerp(40, 1250 * (0.6 + 0.4 * Math.min(1.5, s)), e);
-    const bw = lerp(170, 40, q);
+    // band never reaches the centre: a hollow ring, never a filled disc
+    const bw = Math.min(lerp(170, 40, q), r * 0.42);
     const fade = 1 - E.inQuad(seg(q, 0.55, 1));
     dotRing(ctx, x, y, r, bw, 22, col, fade);
-    // leading solid edge
+    // leading solid edge (black, or white for a black ring)
     ctx.beginPath();
     ctx.arc(x, y, r + 22 * 0.8, 0, TAU);
     ctx.lineWidth = Math.max(2, 16 * fade);
-    ctx.strokeStyle = col === C.white ? C.red : C.white;
+    ctx.strokeStyle = col === C.black || col === C.ink ? C.white : C.black;
     ctx.stroke();
   });
 
@@ -1797,7 +1868,8 @@
       fillPoly(ctx, rect(-262 + 18, 6), C.white);
       fillPoly(ctx, rect(278 - 24, 6), C.white);
     }
-    // starburst behind the card (white core, black keyline), slowly turning
+    // jagged starburst behind the card, slowly turning: black body, red hard
+    // shadow, white keyline (black / red — never red-and-white wedges)
     const si = E.outBack(ein(lt - 0.1, 0.3), 1.8);
     if (si > 0.001) {
       const rot = lt * 0.06;
@@ -1805,14 +1877,17 @@
       ctx.save();
       ctx.translate(cx + 40, cy - 24);
       ctx.scale(sc, sc * 0.84);
+      ctx.lineJoin = 'miter';
       ctx.fillStyle = C.red;
-      MV.draw.burst(ctx, 18, 16, 330, 560, 20, seed + 2, 0.34, -rot * 0.7 + 0.2);
+      MV.draw.burst(ctx, 22, 20, 330, 560, 20, seed + 2, 0.34, -rot * 0.7 + 0.2);
       ctx.fill();
-      ctx.fillStyle = C.white;
       MV.draw.burst(ctx, 0, 0, 330, 560, 20, seed + 2, 0.34, -rot * 0.7 + 0.2);
+      ctx.fillStyle = C.ink;
       ctx.fill();
-      ctx.lineWidth = 12;
-      ctx.strokeStyle = C.black;
+      ctx.fillStyle = tonePattern(ctx, 16, 5, C.gray);
+      ctx.fill();
+      ctx.lineWidth = 7;
+      ctx.strokeStyle = C.white;
       ctx.stroke();
       ctx.restore();
     }

@@ -10,12 +10,16 @@
  *   fx-<name>.png           3×2 sheet of the effect at several local times
  *   full/fx-<name>-<k>.png  a full-resolution frame at the effect's key moment
  *   hud.png, hud-zones.png  HUD on a scene (on/off beat), and with zone outlines
+ *   trans-rev.png           every transition red → dark (p = .3 .5 .7), fx-variants.png effect colour variants
  *   post-sheet.png          Post variants (WebGL2), post-tiers.png (webgl2 / webgl1 / 2d)
  *   full/post-<variant>.png full-resolution Post outputs
  *   perf.json               ms per draw (1920×1080) for every transition / effect / HUD / Post tier
  * and checks: registry complete, layers/durations sane, deterministic, no
  * Math.random / Date.now / performance.now inside draws, p edge cases / bad input
- * don't throw, HUD stays inside its zones, Post works on every tier, no page errors.
+ * don't throw, HUD stays inside its zones, Post works on every tier, no page errors,
+ * palette audit (no cyan / magenta / green introduced by any transition, effect or
+ * Post parameter), "rising-sun" guard (no red/white alternating rays around a
+ * centre), Post.isNeutral contract.
  * Starts `python3 -m http.server <port>` on mv/ if nothing answers there.
  */
 'use strict';
@@ -42,6 +46,11 @@ const want = (n) => !ONLY || ONLY.includes(n);
 
 const TRANSITIONS = ['slash-wipe', 'red-flash', 'shatter', 'ink-wipe', 'star-iris', 'stripe-wipe', 'glitch-cut', 'zoom-punch'];
 const EFFECTS = ['flash', 'speedlines', 'ink', 'stars', 'shards', 'ring', 'frame', 'confetti', 'caption', 'credits', 'title', 'endcard'];
+
+// Audit tolerances: off-palette samples a frame may add over its source frames
+// (slices can duplicate a few cyan-ish scene pixels).
+const PAL_TOL = 150;
+const RAYS_TOL = 4; // red/white ray patterns a frame may add over its source frame(s)
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -136,7 +145,7 @@ const EFFECT_OPTS = {
     args: ['--enable-unsafe-swiftshader', '--use-angle=swiftshader', '--autoplay-policy=no-user-gesture-required']
       .concat(arg('gpu-canvas', false) ? [] : ['--disable-accelerated-2d-canvas']),
   });
-  const summary = { transitions: {}, effects: {}, hud: null, post: {} };
+  const summary = { transitions: {}, effects: {}, hud: null, post: {}, audit: { transitions: {}, effects: {}, post: {} } };
   try {
     const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true })).newPage();
     await routeFonts(page);
@@ -162,6 +171,14 @@ const EFFECT_OPTS = {
       const url = await page.evaluate(() => document.getElementById('cv').toDataURL('image/png'));
       fs.writeFileSync(file, Buffer.from(url.split(',')[1], 'base64'));
     };
+
+    // the rays guard must flag a known rising-sun-like reference (and not a plain frame)
+    const guard = await page.evaluate(() => ({
+      bad: devFx.raysScore({ type: 'rays-test' }).score,
+      badOff: devFx.raysScore({ type: 'rays-test', dx: 230, count: 24, rot: 0.2 }).score,
+      plain: devFx.raysScore({ type: 'bg', bg: devFx.DEF_TO }).score,
+    }));
+    check('rays guard flags a red/white rays reference', guard.bad > 10 && guard.badOff > 8 && guard.plain <= 1, JSON.stringify(guard));
 
     /* ---------------- transitions ---------------- */
     for (const name of TRANSITIONS.filter(want)) {
@@ -227,6 +244,27 @@ const EFFECT_OPTS = {
       }, name);
       check(name + ': edge p / missing canvases / small canvases never throw', robust.errs.length === 0, robust.errs.slice(0, 3).join(' | '));
       check(name + ': restores ctx state', !robust.leaked);
+      // palette + cultural-safety audit, both directions (dark → red and red → dark)
+      const pal = await page.evaluate((n) => {
+        let worst = null, excess = -1e9, rays = 0, raysAt = null;
+        const dirs = [{ from: devFx.DEF_FROM, to: devFx.DEF_TO }, { from: devFx.DEF_TO, to: devFx.DEF_FROM }];
+        for (const d of dirs) {
+          for (const seed of [7, 11]) {
+            for (let k = 0; k < 10; k++) {
+              const o = { type: 'transition', name: n, p: 0.05 + k * 0.1, seed, from: d.from, to: d.to };
+              const c = devFx.palette(o);
+              const ex = Math.max(c.cyan - c.ref.cyan, c.magenta - c.ref.magenta, c.green - c.ref.green);
+              if (ex > excess) { excess = ex; worst = { p: o.p, seed, from: d.from, c }; }
+              const r = devFx.raysScore(o);
+              if (r.score - r.ref > rays) { rays = r.score - r.ref; raysAt = { p: o.p, seed, from: d.from, r }; }
+            }
+          }
+        }
+        return { excess, worst, rays, raysAt };
+      }, name);
+      check(name + ': palette-safe (no cyan / magenta / green introduced)', pal.excess <= PAL_TOL, JSON.stringify(pal.worst));
+      check(name + ': no red/white alternating rays', pal.rays <= RAYS_TOL, 'score ' + pal.rays + ' ' + JSON.stringify(pal.raysAt));
+      summary.audit.transitions[name] = { paletteExcess: pal.excess, rays: pal.rays };
     }
 
     /* ---------------- effects ---------------- */
@@ -293,6 +331,66 @@ const EFFECT_OPTS = {
       }, name);
       check(name + ': bad / partial accents never throw', robust.errs.length === 0, robust.errs.slice(0, 3).join(' | '));
       check(name + ': restores ctx state', !robust.leaked);
+      // palette + cultural-safety audit over the effect's life, colour variants and backgrounds
+      const palE = await page.evaluate((b) => {
+        const cols = { speedlines: [null, 'white', 'black', 'red'], ring: ['red', 'white', 'black'], flash: ['white', 'red'], ink: ['ink', 'red'] }[b.name] || [null];
+        const bgs = [b.bg || devFx.DEF_FROM].concat(devFx.BGS.filter((g) => /sky-red|night-city|sunburst/.test(g) && g !== b.bg));
+        const d = devFx.effectDuration(b.name);
+        let worst = null, excess = -1e9, rays = 0, raysAt = null;
+        for (const col of cols) {
+          for (const bg of bgs) {
+            for (const f of [0.03, 0.12, 0.3, 0.55, 0.8]) {
+              const data = Object.assign({}, b.data || {}, col ? { color: col } : {});
+              const o = Object.assign({}, b, { bg, lt: d * f, data });
+              const c = devFx.palette(o);
+              const ex = Math.max(c.cyan - c.ref.cyan, c.magenta - c.ref.magenta, c.green - c.ref.green);
+              if (ex > excess) { excess = ex; worst = { col, bg, f, c }; }
+              const r = devFx.raysScore(o, b.x, b.y);
+              if (r.score - r.ref > rays) { rays = r.score - r.ref; raysAt = { col, bg, f, r }; }
+            }
+          }
+        }
+        return { excess, worst, rays, raysAt };
+      }, base);
+      check(name + ': palette-safe (no cyan / magenta / green introduced)', palE.excess <= PAL_TOL, JSON.stringify(palE.worst));
+      check(name + ': no red/white alternating rays', palE.rays <= RAYS_TOL, 'score ' + palE.rays + ' ' + JSON.stringify(palE.raysAt));
+      summary.audit.effects[name] = { paletteExcess: palE.excess, rays: palE.rays };
+    }
+
+    /* ---------------- extra sheets: red → dark transitions, effect colour variants ---------------- */
+    if (!ONLY || want('sheets')) {
+      const red = bgOK('scene:sky-red@50') || 'stub-b', dark = bgOK('scene:night-city@20') || 'stub-a';
+      const cells = [];
+      for (const name of TRANSITIONS) for (const p of [0.3, 0.5, 0.7]) cells.push({ type: 'transition', name, p, seed: 11, from: red, to: dark, label: name + ' ' + p });
+      await page.evaluate((o) => devFx.sheet(o), { cols: 6, rows: 4, cells });
+      await savePNG(path.join(OUT, 'trans-rev.png'));
+      const sun = bgOK('scene:sunburst@4') || red, star = bgOK('scene:starfield@115') || dark;
+      const V2 = [
+        { name: 'speedlines', f: 0.3, bg: dark, data: { color: 'white' }, x: 1100, y: 480 },
+        { name: 'speedlines', f: 0.3, bg: red, data: { color: 'white' }, x: 1100, y: 480 },
+        { name: 'speedlines', f: 0.3, bg: sun, data: { color: 'red' }, x: 960, y: 540 },
+        { name: 'ring', f: 0.2, bg: red, data: { color: 'white' } },
+        { name: 'ring', f: 0.2, bg: sun, data: { color: 'black' } },
+        { name: 'stars', f: 0.08, bg: red },
+        { name: 'flash', f: 0.4, bg: dark, data: { color: 'red' } },
+        { name: 'ink', f: 0.3, bg: dark, data: { color: 'red' } },
+        { name: 'title', lt: 1.4, bg: red },
+        { name: 'endcard', lt: 4.5, bg: sun },
+        { name: 'credits', lt: 2.5, bg: star },
+        { name: 'frame', f: 0.3, bg: red },
+      ];
+      await page.evaluate((o) => devFx.sheet(o), {
+        cols: 4, rows: 3,
+        cells: o2cells(V2),
+      });
+      await savePNG(path.join(OUT, 'fx-variants.png'));
+      function o2cells(list) {
+        return list.map((v) => {
+          const dur = durs.e[v.name];
+          const lt = v.lt != null ? v.lt : v.f * dur;
+          return { type: 'effect', name: v.name, lt, seed: 7, bg: v.bg, x: v.x, y: v.y, data: v.data, label: v.name + ' ' + ((v.data && v.data.color) || '') + ' / ' + String(v.bg).replace('scene:', '') };
+        });
+      }
     }
 
     /* ---------------- HUD ---------------- */
@@ -441,12 +539,43 @@ const EFFECT_OPTS = {
         return { mode: p.mode, ok: p.render(s, { glitch: 1, grain: 1, vignette: 1, scanlines: 1, flash: 0.2, redFlash: 0.2, invert: 0.5, rgbShift: 12, time: 3 }) };
       });
       check('Post on a canvas that already has a 2D context → 2D fallback', on2d.mode === '2d' && on2d.ok, JSON.stringify(on2d));
+      // palette audit: no Post parameter may introduce cyan / magenta / green on any tier
+      const palP = await page.evaluate((o) => {
+        const out = {};
+        let excess = -1e9, worst = null;
+        for (const tier of ['webgl2', 'webgl1', '2d']) {
+          for (const bg of o.bgs) {
+            for (const params of o.variants) {
+              const c = devFx.palette({ post: { tier, bg, params } });
+              const ex = Math.max(c.cyan - c.ref.cyan, c.magenta - c.ref.magenta, c.green - c.ref.green);
+              if (ex > excess) { excess = ex; worst = { tier, bg, params, c }; }
+            }
+          }
+        }
+        out.excess = excess;
+        out.worst = worst;
+        return out;
+      }, { bgs: [src, src2], variants: V.map((v) => v.params).concat([combo, { glitch: 1, glitchSeed: 21, rgbShift: 12 }, { invert: 0.5 }, { glitch: 0.8, glitchSeed: 40, invert: 1 }]) });
+      check('Post palette-safe on every tier (no cyan / magenta / green introduced)', palP.excess <= PAL_TOL, JSON.stringify(palP.worst));
+      summary.audit.post = { paletteExcess: palP.excess };
+      const neu = await page.evaluate(() => {
+        const P = MV.Post;
+        const p = new P(document.createElement('canvas'), { prefer: '2d' });
+        return {
+          staticFn: typeof P.isNeutral === 'function', method: typeof p.isNeutral === 'function',
+          empty: P.isNeutral({}), none: P.isNeutral(), defaults: P.isNeutral(P.defaults()), tinyShift: P.isNeutral({ rgbShift: 0.1, time: 9 }),
+          grain: P.isNeutral({ grain: 0.07 }), vig: p.isNeutral({ vignette: 0.35 }), shift: p.isNeutral({ rgbShift: 2 }), inv: p.isNeutral({ invert: 0.2 }),
+        };
+      });
+      check('Post.isNeutral(params) / post.isNeutral(params)', neu.staticFn && neu.method && neu.empty && neu.none && neu.defaults && neu.tinyShift && !neu.grain && !neu.vig && !neu.shift && !neu.inv, JSON.stringify(neu));
       if (!arg('no-perf', false)) {
         for (const tier of ['webgl2', 'webgl1', '2d']) {
           const neutral = await page.evaluate((o) => devFx.perfPost(o), { tier, bg: src, frames: 40, params: {} });
           const full = await page.evaluate((o) => devFx.perfPost(o), { tier, bg: src, frames: 40, params: combo });
-          summary.post[tier] = { neutral: +neutral.avg.toFixed(2), neutralP95: +neutral.p95.toFixed(2), combo: +full.avg.toFixed(2), comboP95: +full.p95.toFixed(2), mode: full.mode };
-          console.log(`perf post ${tier.padEnd(7)} neutral ${neutral.avg.toFixed(2)} ms (p95 ${neutral.p95.toFixed(2)}) | combo ${full.avg.toFixed(2)} ms (p95 ${full.p95.toFixed(2)})  [${full.mode}]`);
+          // what the Director sends on a typical beat: grain + vignette + a small red ghost
+          const typ = await page.evaluate((o) => devFx.perfPost(o), { tier, bg: src, frames: 40, params: { grain: 0.07, vignette: 0.35, rgbShift: 2.5 } });
+          summary.post[tier] = { neutral: +neutral.avg.toFixed(2), neutralP95: +neutral.p95.toFixed(2), typical: +typ.avg.toFixed(2), combo: +full.avg.toFixed(2), comboP95: +full.p95.toFixed(2), mode: full.mode };
+          console.log(`perf post ${tier.padEnd(7)} neutral ${neutral.avg.toFixed(2)} ms (p95 ${neutral.p95.toFixed(2)}) | typical ${typ.avg.toFixed(2)} ms | combo ${full.avg.toFixed(2)} ms (p95 ${full.p95.toFixed(2)})  [${full.mode}]`);
         }
       }
     }
