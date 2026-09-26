@@ -34,8 +34,8 @@
  * carry `avoid = { mode: 'away' | 'focus', lines: [{ line, style, id }] }`;
  * the Stage turns the lines' layout bounds into a burst position off the text
  * ('away') or a focus on the sung line ('focus'). Speedline / ring colours
- * follow the ground of the scene cue under them (sceneTone: 'sunburst' has a
- * red, a black and a blood scheme by variant % 3), so they always contrast.
+ * follow the ground of the scene cue under them (sceneTone: e.g. 'sunburst'
+ * has a red, a black and a blood scheme by variant % 3), so they always contrast.
  *
  * Lyric windows: consecutive lines overlap ≤ 0.25 s (only when a line is too
  * short to clear before the next enters); the outgoing exit ramp (lt.out,
@@ -119,20 +119,29 @@
   // Scenes whose palette is mostly red / white (speedlines turn black there).
   const BRIGHT_SCENES = new Set(['sunburst', 'sky-red', 'stripes']);
   /**
-   * Background tone of a scene cue, for accent colours that must contrast:
-   * 'bright' (red / white ground), 'dark' (black) or 'deep' (blood red).
-   * 'sunburst' picks its scheme by variant % 3 (scenes.js SB_SCHEMES: red,
-   * black, blood), so only scheme 0 is bright.
+   * Ground of a scene cue, for accent colours that must contrast with it:
+   * 'bright' (red), 'light' (white), 'dark' (black / navy) or 'deep' (blood
+   * red). Mirrors the variant rules of js/render/scenes.js for the scenes
+   * whose ground changes with the variant: 'sunburst' SB_SCHEMES[v % 3] =
+   * red / black / blood, 'shards' bg[v % 3] = black / white / red, 'crowd'
+   * red unless night (I < 0.5 ? v even : v odd).
    */
   function sceneTone(cue) {
     if (!cue) return 'dark';
-    if (cue.name === 'sunburst') return ['bright', 'dark', 'deep'][mod(cue.variant | 0, 3)];
+    const v = Math.abs(cue.variant | 0);
+    if (cue.name === 'sunburst') return ['bright', 'dark', 'deep'][v % 3];
+    if (cue.name === 'shards') return ['dark', 'light', 'bright'][v % 3];
+    if (cue.name === 'crowd') {
+      const I = fin(cue.intensity, 0.5);
+      return (I < 0.5 ? v % 2 === 0 : v % 2 === 1) ? 'dark' : 'bright';
+    }
     return BRIGHT_SCENES.has(cue.name) ? 'bright' : 'dark';
   }
-  // Accent colours per tone: speedlines black only on a bright ground; rings
-  // white on bright / blood grounds (a red ring vanishes into red / blood).
-  const SPEED_COLOR = { bright: 'black', dark: 'white', deep: 'white' };
-  const RING_COLOR = { bright: 'white', dark: 'red', deep: 'white' };
+  // Accent colours per ground. Speedlines: black on red / white grounds, else
+  // white (fx.js draws light lines with a black stroke, never bare red/white
+  // rays). Rings: white on red / blood (a red ring vanishes there), else red.
+  const SPEED_COLOR = { bright: 'black', light: 'black', dark: 'white', deep: 'white' };
+  const RING_COLOR = { bright: 'white', light: 'red', dark: 'red', deep: 'white' };
   const STAR_SCENES = new Set(['starfield', 'void']);
 
   const LYRIC_IN = 0.3, LYRIC_OUT = 0.35, LYRIC_GAP = 0.05, LYRIC_LONG_GAP = 3.0, LYRIC_TAIL = 1.4;

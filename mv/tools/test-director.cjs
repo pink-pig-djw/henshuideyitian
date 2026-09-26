@@ -300,15 +300,24 @@ function suite(label, dir, o = {}) {
   check(`${label}: frame / flash accents only in choruses`, byKind('frame').concat(byKind('flash')).every((a) => /chorus|climax/.test(secOf(a.t).kind)), `frame=${byKind('frame').length} flash=${byKind('flash').length}`);
   check(`${label}: speedlines only at intensity ≥ 0.7`, byKind('speedlines').every((a) => dir.intensityAt(a.t) >= 0.7), `${byKind('speedlines').length}`);
   {
-    // Accent colours contrast with the scene ground under them. 'sunburst'
-    // has three schemes (variant % 3: red, black, blood): black speedlines /
-    // red rings only where they can be seen.
-    const tone = (c) => (c.name === 'sunburst' ? ['bright', 'dark', 'deep'][MV.mod(c.variant, 3)] : /^(sky-red|stripes)$/.test(c.name) ? 'bright' : 'dark');
-    const okCol = { speedlines: { bright: ['black'], dark: ['white', 'red'], deep: ['white'] }, ring: { bright: ['white', 'black'], dark: ['red', 'white'], deep: ['white', 'black'] } };
+    // Accent colours contrast with the scene ground under them (grounds per
+    // scenes.js variant rules): 'sunburst' v % 3 = red / black / blood,
+    // 'shards' v % 3 = black / white / red, 'crowd' red unless night.
+    const tone = (c) => {
+      const v = c.variant;
+      if (c.name === 'sunburst') return ['bright', 'dark', 'deep'][MV.mod(v, 3)];
+      if (c.name === 'shards') return ['dark', 'light', 'bright'][MV.mod(v, 3)];
+      if (c.name === 'crowd') return (c.intensity < 0.5 ? v % 2 === 0 : v % 2 === 1) ? 'dark' : 'bright';
+      return /^(sky-red|stripes)$/.test(c.name) ? 'bright' : 'dark';
+    };
+    const okCol = {
+      speedlines: { bright: ['black'], light: ['black', 'red'], dark: ['white', 'red'], deep: ['white'] },
+      ring: { bright: ['white', 'black'], light: ['red', 'black'], dark: ['red', 'white'], deep: ['white', 'black'] },
+    };
     const tested = acc.filter((a) => okCol[a.kind] && a.data && a.data.color);
     const badCol = tested.filter((a) => okCol[a.kind][tone(dir.sceneCueAt(a.t))].indexOf(a.data.color) < 0);
     const sbTones = new Set(sc.filter((c) => c.name === 'sunburst').map(tone));
-    check(`${label}: speedlines / ring colours contrast with the scene scheme (sunburst red / black / blood)`, badCol.length === 0,
+    check(`${label}: speedlines / ring colours contrast with the scene ground (sunburst / shards schemes, crowd day/night)`, badCol.length === 0,
       `${tested.length} accents, sunburst schemes used: ${[...sbTones].join('/')}` + (badCol.length ? ' bad: ' + badCol.slice(0, 4).map((a) => `${a.kind}@${f3(a.t)} ${a.data.color} on ${dir.sceneCueAt(a.t).name} v${dir.sceneCueAt(a.t).variant}`).join(', ') : ''));
   }
   const secStarts = acc.filter((a) => (a.kind === 'ink' || a.kind === 'shards') && S.some((s) => Math.abs(s.cut - a.t) < 0.1));
