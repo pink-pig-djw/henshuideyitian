@@ -93,6 +93,8 @@
   // Accent placement around lyric bounds (logical px).
   const AWAY_MARGIN = 170; //  clearance between a stars burst centre and the text box
   const AWAY_FRAME = { x0: 150, y0: 130, x1: W - 150, y1: H - 130 }; // burst centres stay on screen
+  const HUD_BOXES = [{ x0: 0, y0: H - 110, x1: 620, y1: H }, { x0: W - 360, y0: 0, x1: W, y1: 90 }];
+  const HUD_MARGIN = 150; //   a moved burst also keeps off the HUD plates
   // Signed distance from (px, py) to box B: > 0 outside, ≤ 0 inside.
   function boxDist(B, px, py) {
     const dx = Math.max(B.x0 - px, 0, px - B.x1);
@@ -100,22 +102,33 @@
     if (dx > 0 || dy > 0) return Math.hypot(dx, dy);
     return -Math.min(px - B.x0, B.x1 - px, py - B.y0, B.y1 - py);
   }
-  // Nearest point to (x, y) at least `m` clear of box B (above / below / left /
-  // right of it, or a frame corner when the text fills the frame). Pure.
+  const hudDist = (px, py) => Math.min(boxDist(HUD_BOXES[0], px, py), boxDist(HUD_BOXES[1], px, py));
+  /**
+   * Where a burst at (x, y) should go so its centre is ≥ m clear of text box
+   * B: unchanged when already clear, else the nearest of a few candidates
+   * (just above / below / left / right of the box, frame corners and edge
+   * midpoints) scored by text clearance (capped at m), HUD clearance and a
+   * small displacement cost. Pure. → { x, y, clear: 0..1 (text clearance / m) }
+   */
   function placeAway(B, x, y, m) {
-    if (boxDist(B, x, y) >= m) return [x, y];
+    if (boxDist(B, x, y) >= m) return { x, y, clear: 1 };
     const F = AWAY_FRAME;
-    const cands = [[x, B.y0 - m], [x, B.y1 + m], [B.x0 - m, y], [B.x1 + m, y], [F.x0, F.y0], [F.x1, F.y0], [F.x0, F.y1], [F.x1, F.y1]];
-    let best = [x, y];
+    const cands = [
+      [x, B.y0 - m], [x, B.y1 + m], [B.x0 - m, y], [B.x1 + m, y],
+      [F.x0, F.y0], [F.x1, F.y0], [F.x0, F.y1], [F.x1, F.y1],
+      [W / 2, F.y0], [W / 2, F.y1], [F.x0, H / 2], [F.x1, H / 2],
+    ];
+    let best = null;
     let bestScore = -Infinity;
     for (const c of cands) {
       const cx = clamp(c[0], F.x0, F.x1), cy = clamp(c[1], F.y0, F.y1);
-      const score = Math.min(boxDist(B, cx, cy), m) - 0.002 * Math.hypot(cx - x, cy - y);
+      const score = Math.min(boxDist(B, cx, cy), m) + 0.5 * Math.min(hudDist(cx, cy), HUD_MARGIN) - 0.002 * Math.hypot(cx - x, cy - y);
       if (score > bestScore + 1e-9) {
         bestScore = score;
-        best = [cx, cy];
+        best = { x: cx, y: cy };
       }
     }
+    best.clear = clamp(boxDist(B, best.x, best.y) / m, 0, 1);
     return best;
   }
 
@@ -541,8 +554,10 @@
       out.y = clamp((B.y0 + B.y1) / 2, 200, H - 200);
     } else {
       const p = placeAway(B, fin(a.x, W / 2), fin(a.y, H / 2), AWAY_MARGIN);
-      out.x = p[0];
-      out.y = p[1];
+      out.x = p.x;
+      out.y = p.y;
+      // No fully clear spot (text fills the frame): a smaller, tighter burst.
+      if (p.clear < 1) out.strength = +(fin(a.strength, 1) * (0.55 + 0.45 * p.clear)).toFixed(3);
     }
     return out;
   };

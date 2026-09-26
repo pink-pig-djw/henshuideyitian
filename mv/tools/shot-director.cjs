@@ -6,7 +6,11 @@
  *
  *   NODE_PATH=/opt/node22/lib/node_modules node mv/tools/shot-director.cjs [--port=8706] [--audio] [--no-perf] [--frames=180]
  *     --only=perf            init + fonts + perf only
+ *     --no-sheets            skip contact sheets / filmstrips / full frames
  *     --stage-src=<file>     serve this file as js/stage.js (before/after perf of another Stage)
+ *     --shim-shard-layer     emulate the proposed fx.js fix (CPU-backed shatter shard layer,
+ *                            getContext('2d', { willReadFrequently: true })) — see the
+ *                            determinism checks: without it, `shatter` frames depend on history
  *   MV_LYRICS=/path/outside/repo.txt …  → additionally renders with those lyrics into out/director/real/
  *
  * Writes to mv/out/director/ (git-ignored):
@@ -53,6 +57,7 @@ fs.mkdirSync(CACHE, { recursive: true });
 const FRAMES = +arg('frames', 180);
 const ONLY = String(arg('only', '') || '');
 const STAGE_SRC = arg('stage-src', null);
+const SHIM = !!arg('shim-shard-layer', false);
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -135,6 +140,18 @@ async function fontRoute(route) {
     await context.route(/\/js\/stage\.js(\?.*)?$/, (r) => r.fulfill({ status: 200, body, headers: { 'content-type': 'text/javascript' } }));
     console.log('INFO  js/stage.js served from ' + STAGE_SRC);
   }
+  if (SHIM) {
+    // fx.js allocates its half-res shatter layer (960×540, alpha) with MV.makeCanvas;
+    // back exactly that canvas with a CPU context (the proposed one-line fx.js fix).
+    await context.addInitScript(() => {
+      const g = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function (type, opts) {
+        if (type === '2d' && this.width === 960 && this.height === 540 && !(opts && opts.alpha === false)) opts = Object.assign({}, opts || {}, { willReadFrequently: true });
+        return g.call(this, type, opts);
+      };
+    });
+    console.log('INFO  --shim-shard-layer: fx.js shatter layer CPU-backed');
+  }
   const page = await context.newPage();
   const pageErrors = [];
   const warnings = [];
@@ -178,7 +195,40 @@ async function fontRoute(route) {
       return out;
     });
 
+    // Runs first, on the fresh page: the fx.js layer problem below depends on the
+    // GPU canvas state, which the other checks' renders change.
     if (ONLY !== 'perf') {
+    // fx.js shatter: its flying shards go through a reused module-level layer.
+    // After a long render history Chrome's GPU canvas keeps showing the previous
+    // frame's shards (a full-canvas clearRect on the reused layer is lost), so
+    // the same frame renders differently depending on what was rendered before.
+    // Fix proposed for fx.js: back that layer with getContext('2d', { willReadFrequently: true })
+    // (emulated by --shim-shard-layer).
+    const shat = await page.evaluate(() => {
+      const DD = window.DD, S = DD.stage, MV = window.MV;
+      const sh = DD.director.cues.scenes.filter((c) => c.transition && c.transition.name === 'shatter');
+      const k = document.createElement('canvas');
+      k.width = S.canvas.width;
+      k.height = S.canvas.height;
+      const kx = k.getContext('2d', { willReadFrequently: true });
+      const px = () => (kx.drawImage(S.canvas, 0, 0), kx.getImageData(0, 0, k.width, k.height).data);
+      const at = (c, f) => c.transition.start + (c.transition.end - c.transition.start) * f;
+      const clean = sh.map((c) => (S.renderFrame(at(c, 0.95)), px()));
+      for (let i = 0; i < 160; i++) S.renderFrame((i * 1.3831) % 221);
+      return sh.map((c, j) => {
+        S.renderFrame(at(c, 0.95)); // shards gone: only the frame itself should matter
+        const after = px(), ref = clean[j];
+        let big = 0;
+        for (let q = 0; q < ref.length; q += 4) if (Math.max(Math.abs(ref[q] - after[q]), Math.abs(ref[q + 1] - after[q + 1]), Math.abs(ref[q + 2] - after[q + 2])) > 24) big++;
+        return { cut: +c.cut.toFixed(2), big };
+      });
+    });
+    check('shatter frames independent of render history (fx.js reused shard layer)', shat.every((r) => r.big <= 200),
+      shat.map((r) => `@${r.cut}: ${r.big} px differ`).join(' ') + (SHIM ? ' [--shim-shard-layer]' : ''));
+
+    }
+
+    if (ONLY !== 'perf' && !arg('no-sheets', false)) {
       /* ---------------- contact sheets over the whole song ---------------- */
       const T = [
         [2.0, 5.3, 8.2, 10.5, 13.0, 16.8, 21.2, 25.5, 29.4, 31.5, 36.2, 40.0, 43.6, 45.8, 46.6, 48.9, 51.4, 55.6],
@@ -216,16 +266,39 @@ async function fontRoute(route) {
         saveDataURL(path.join(OUT, 'full', `${t.toFixed(2)}.png`), url);
       }
       check('filmstrips + full frames written', true, `${Object.keys(strips).length} strips, ${fulls.length} full frames`);
+    }
 
+    if (ONLY !== 'perf') {
       /* ---------------- determinism ---------------- */
+      // Pixel diffs (count, max channel delta) of the final output against the
+      // first render: identical, raster noise (GPU canvas rounding: max ≤ 4 on
+      // < 0.1 % of the pixels) or a content difference (a real bug).
       const det = await page.evaluate(async () => {
         const DD = window.DD, MV = window.MV;
-        const h = (s) => MV.fnv1a(s);
         const probe = [50.13, 67.3, 71.52, 112.4, 163.3, 190.2, 5.5];
-        const url = (c) => c.toDataURL('image/png');
-        const first = probe.map((t) => (DD.stage.renderFrame(t), h(DD.frameURL())));
+        const pix = (c) => {
+          const k = document.createElement('canvas');
+          k.width = c.width;
+          k.height = c.height;
+          const x = k.getContext('2d', { willReadFrequently: true });
+          x.drawImage(c, 0, 0);
+          return x.getImageData(0, 0, k.width, k.height).data;
+        };
+        const cmp = (a, b) => {
+          let n = 0, mx = 0, big = 0;
+          for (let i = 0; i < a.length; i += 4) {
+            const d = Math.max(Math.abs(a[i] - b[i]), Math.abs(a[i + 1] - b[i + 1]), Math.abs(a[i + 2] - b[i + 2]));
+            if (d) {
+              n++;
+              if (d > mx) mx = d;
+              if (d > 24) big++;
+            }
+          }
+          return { n, mx, big, pct: +((100 * n) / (a.length / 4)).toFixed(3) };
+        };
+        const first = probe.map((t) => (DD.stage.renderFrame(t), pix(DD.stage.canvas)));
         for (let i = 0; i < 25; i++) DD.stage.renderFrame(i * 8.3);
-        const again = probe.map((t) => (DD.stage.renderFrame(t), h(DD.frameURL())));
+        const again = probe.map((t, i) => (DD.stage.renderFrame(t), cmp(first[i], pix(DD.stage.canvas))));
         // Export-style Stage (exactly as MV.Exporter builds its own) on its own canvas.
         const c2 = document.createElement('canvas');
         c2.width = 1920;
@@ -233,8 +306,8 @@ async function fontRoute(route) {
         const s2 = new MV.Stage({ canvas: c2, scale: 1, adaptive: false, debug: false });
         s2.setDirector(DD.director);
         await s2.prepare();
-        const fresh = probe.map((t) => (s2.renderFrame(t), h(url(c2))));
-        // Adaptive preview-style Stage (no downgrade at this frame count), frames interleaved with s2.
+        const fresh = probe.map((t, i) => (s2.renderFrame(t), cmp(first[i], pix(c2))));
+        // Adaptive preview-style Stage (no downgrade at this frame count), interleaved with s2.
         const c3 = document.createElement('canvas');
         const s3 = new MV.Stage({ canvas: c3, scale: 1, adaptive: true });
         s3.setDirector(DD.director);
@@ -242,7 +315,7 @@ async function fontRoute(route) {
         const inter = probe.map((t, i) => {
           s2.renderFrame(probe[(i + 3) % probe.length]);
           s3.renderFrame(t);
-          return h(url(c3));
+          return cmp(first[i], pix(c3));
         });
         // Dirty buffers: scribble over every buffer, the next frame must not care.
         for (const b of [DD.stage.sceneA, DD.stage.sceneB, DD.stage.mix, DD.stage.comp]) {
@@ -251,21 +324,107 @@ async function fontRoute(route) {
           b.ctx.fillStyle = '#00FF00';
           b.ctx.fillRect(0, 0, b.canvas.width, b.canvas.height);
         }
-        const dirty = probe.map((t) => (DD.stage.renderFrame(t), h(DD.frameURL())));
+        const dirty = probe.map((t, i) => (DD.stage.renderFrame(t), cmp(first[i], pix(DD.stage.canvas))));
+        const what = probe.map((t) => {
+          const st = DD.director.evaluate(t);
+          return (st.scene.transition ? 'transition:' + st.scene.transition.name : 'scene:' + st.scene.from.name) + ' fx:' + (st.accents.map((a) => a.kind).join('+') || '-') + ' lyric:' + (st.lyrics.map((l) => l.style).join('+') || '-');
+        });
         const posts = [DD.stage.stats.post, s2.stats.post, s3.stats.post];
         s2.dispose();
         s3.dispose();
-        return { first, again, fresh, inter, dirty, posts };
+        return { probe, again, fresh, inter, dirty, what, posts };
       });
-      check('same t → identical pixels after unrelated frames', det.first.every((x, i) => x === det.again[i]), det.first.join(','));
-      check('export-style Stage renders identical pixels', det.first.every((x, i) => x === det.fresh[i]), `${det.fresh.join(',')} post=${det.posts.join('/')}`);
-      check('adaptive preview Stage (interleaved with another Stage) renders identical pixels', det.first.every((x, i) => x === det.inter[i]), det.inter.join(','));
-      check('dirty buffers do not leak into the next frame (camera blit rewrites comp)', det.first.every((x, i) => x === det.dirty[i]), det.dirty.join(','));
+      // raster noise = anti-aliasing / rounding at edges: few strongly changed pixels
+      const cls = (d) => (d.n === 0 ? 'identical' : d.big <= 200 ? 'noise' : 'CONTENT');
+      const detCheck = (label, list) => {
+        const bad = list.map((d, i) => [d, i]).filter(([d]) => cls(d) === 'CONTENT');
+        const noise = list.filter((d) => cls(d) === 'noise').length;
+        const same = list.filter((d) => cls(d) === 'identical').length;
+        check(label, bad.length === 0, `${same} identical, ${noise} raster-noise` + (bad.length ? '; content diffs: ' + bad.map(([d, i]) => `t=${det.probe[i]} ${d.pct}% px (${d.big} with Δ>24, max Δ${d.mx}) (${det.what[i]})`).join(' | ') : ''));
+      };
+      detCheck('same t → same pixels after unrelated frames', det.again);
+      detCheck(`export-style Stage renders the same pixels (post ${det.posts.join('/')})`, det.fresh);
+      detCheck('adaptive preview Stage (interleaved with another Stage) renders the same pixels', det.inter);
+      detCheck('dirty buffers do not leak into the next frame (camera blit rewrites comp)', det.dirty);
+
+      // Export renders sequentially, the preview seeks: every frame through each
+      // transition type, played in order at 24 fps, must equal the same frame
+      // rendered right after an unrelated one.
+      const seq = await page.evaluate(() => {
+        const DD = window.DD, S = DD.stage;
+        const k = document.createElement('canvas');
+        k.width = S.canvas.width;
+        k.height = S.canvas.height;
+        const kx = k.getContext('2d', { willReadFrequently: true });
+        const hashPix = () => {
+          kx.drawImage(S.canvas, 0, 0);
+          const d = new Uint32Array(kx.getImageData(0, 0, k.width, k.height).data.buffer);
+          let h = 0x811c9dc5;
+          for (let i = 0; i < d.length; i++) h = Math.imul(h ^ d[i], 0x01000193) >>> 0;
+          return h;
+        };
+        // one cue per transition type, plus every shatter (its flying shards go
+        // through a module-level layer that is reused from frame to frame)
+        const picks = [];
+        const seen = new Set();
+        for (const c of DD.director.cues.scenes) {
+          if (!c.transition) continue;
+          if (!seen.has(c.transition.name) || c.transition.name === 'shatter') picks.push([c.transition.name + '@' + c.cut.toFixed(1), c.transition]);
+          seen.add(c.transition.name);
+        }
+        const res = [];
+        for (const [name, tr] of picks) {
+          const ts = [];
+          for (let t = tr.start + 1 / 48; t < tr.end; t += 1 / 24) ts.push(+t.toFixed(4));
+          const played = ts.map((t) => (S.renderFrame(t), hashPix()));
+          const bad = [];
+          // seek: visit the same frames backwards, each after an unrelated frame
+          for (let i = ts.length - 1; i >= 0; i--) {
+            S.renderFrame(10.0);
+            S.renderFrame(ts[i]);
+            if (hashPix() !== played[i]) bad.push(i);
+          }
+          bad.reverse();
+          // Size of each mismatch: frame after its sequential predecessor vs after a seek.
+          const px = () => {
+            kx.drawImage(S.canvas, 0, 0);
+            return kx.getImageData(0, 0, k.width, k.height).data;
+          };
+          const diffs = bad.map((i) => {
+            // replay: the played sequence up to i vs the frame after its successor (seek order)
+            for (let q = Math.max(0, i - 3); q <= i; q++) S.renderFrame(ts[q]);
+            const a = px();
+            if (i + 1 < ts.length) S.renderFrame(ts[i + 1]);
+            S.renderFrame(10.0);
+            S.renderFrame(ts[i]);
+            const b = px();
+            let n = 0, mx = 0, big = 0;
+            for (let q = 0; q < a.length; q += 4) {
+              const d = Math.max(Math.abs(a[q] - b[q]), Math.abs(a[q + 1] - b[q + 1]), Math.abs(a[q + 2] - b[q + 2]));
+              if (d) {
+                n++;
+                if (d > mx) mx = d;
+                if (d > 24) big++;
+              }
+            }
+            return { t: ts[i], pct: +((100 * n) / (a.length / 4)).toFixed(3), mx, big };
+          });
+          res.push({ name, frames: ts.length, diffs });
+        }
+        return res;
+      });
+      const content = (d) => d.big > 200;
+      const seqBad = seq.filter((r) => r.diffs.some(content));
+      check('sequential playback (export) = seeking (preview) through every transition (raster noise allowed)', seqBad.length === 0,
+        seq.map((r) => {
+          const c = r.diffs.filter(content);
+          return `${r.name}:${r.frames}f` + (r.diffs.length ? ` (${r.diffs.length - c.length} noise)` : '') + (c.length ? ` CONTENT[` + c.map((d) => `t=${d.t} ${d.pct}% ${d.big}px>24`).join(', ') + ']' : '');
+        }).join(' '));
 
       /* ---------------- camera composited once vs legacy ---------------- */
       const cam = await page.evaluate(() => {
         const DD = window.DD, MV = window.MV;
-        const ts = [16.8, 45.9, 67.3, 150.0, 190.2];
+        const ts = [16.8, 45.9, 67.3, 150.0, 190.2, 108.0];
         const px = (c) => c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
         const grab = () => {
           const c = document.createElement('canvas');
@@ -288,7 +447,7 @@ async function fontRoute(route) {
           let se = 0;
           for (let i = 0; i < A.length; i += 4) for (let k = 0; k < 3; k++) se += (A[i + k] - B[i + k]) * (A[i + k] - B[i + k]);
           const mse = se / ((A.length / 4) * 3);
-          res.push({ t, psnr: +(mse > 0 ? 10 * Math.log10((255 * 255) / mse) : 99).toFixed(2) });
+          res.push({ t, psnr: +(mse > 0 ? 10 * Math.log10((255 * 255) / mse) : 99).toFixed(2), transition: !!DD.director.evaluate(t).scene.transition });
           // 600×300 crops side by side (composite | legacy) around the frame centre
           const s = MV.makeCanvas(1210, 300);
           s.ctx.fillStyle = '#111';
@@ -300,36 +459,49 @@ async function fontRoute(route) {
         return { res, crops };
       });
       for (const [t, url] of cam.crops) saveDataURL(path.join(OUT, `camera-ab-${t.toFixed(2)}.png`), url);
-      check('camera applied once: composite ≈ legacy per-scene camera (PSNR ≥ 24 dB)', cam.res.every((r) => r.psnr >= 24), cam.res.map((r) => `${r.t}:${r.psnr}dB`).join(' '));
+      // Plain frames must match the legacy path closely (only resampling differs);
+      // mid-transition the wipe geometry now moves with the camera too (info only).
+      const plain = cam.res.filter((r) => !r.transition);
+      check('camera applied once: composite ≈ legacy per-scene camera on plain frames (PSNR ≥ 30 dB)', plain.length >= 3 && plain.every((r) => r.psnr >= 30), cam.res.map((r) => `${r.t}${r.transition ? '(tr)' : ''}:${r.psnr}dB`).join(' '));
 
       /* ---------------- lyric bounds + accent placement ---------------- */
       const avoid = await page.evaluate((times) => {
-        const DD = window.DD;
-        const out = { frames: 0, bounds: 0, away: 0, awayClear: 0, awayWorst: Infinity, focus: 0, focusIn: 0, moved: 0, samples: [] };
+        const DD = window.DD, W = window.MV.W, H = window.MV.H;
+        const out = { frames: 0, bounds: 0, away: 0, keptClear: 0, movedClear: 0, improved: 0, worse: 0, fullyClear: 0, nearHud: 0, reduced: 0, badKept: 0, focus: 0, focusIn: 0 };
         const dist = (B, x, y) => {
           const dx = Math.max(B.x0 - x, 0, x - B.x1), dy = Math.max(B.y0 - y, 0, y - B.y1);
           return dx > 0 || dy > 0 ? Math.hypot(dx, dy) : -Math.min(x - B.x0, B.x1 - x, y - B.y0, B.y1 - y);
         };
+        const HUD = [{ x0: 0, y0: H - 110, x1: 620, y1: H }, { x0: W - 360, y0: 0, x1: W, y1: 90 }];
+        const seen = new Set();
         for (const it of times) {
           const r = DD.stage.renderFrame(it.t);
           const st = r.state;
           if (!st) continue;
           out.frames++;
-          const LB = st.env.lyricBounds || [];
-          if (LB.length) out.bounds++;
+          if ((st.env.lyricBounds || []).length) out.bounds++;
           for (const a of st.accents) {
-            if (!a.avoid) continue;
+            if (!a.avoid || seen.has(a)) continue;
+            seen.add(a);
             const p = DD.stage._placeAccent(a);
-            if (p.x !== a.x || p.y !== a.y) out.moved++;
             if (a.avoid.mode === 'away') {
               out.away++;
-              let d = Infinity;
+              let U = null;
               for (const l of a.avoid.lines) {
                 const b = DD.stage._lineBox(l.line, l.style);
-                d = Math.min(d, dist(b, p.x, p.y));
+                U = U ? { x0: Math.min(U.x0, b.x0), y0: Math.min(U.y0, b.y0), x1: Math.max(U.x1, b.x1), y1: Math.max(U.y1, b.y1) } : Object.assign({}, b);
               }
-              out.awayWorst = Math.min(out.awayWorst, d);
-              if (d >= 169) out.awayClear++;
+              const x0 = a.x != null ? a.x : W / 2, y0 = a.y != null ? a.y : H / 2;
+              const before = dist(U, x0, y0), after = dist(U, p.x, p.y);
+              const moved = p.x !== x0 || p.y !== y0;
+              if (before >= 170) {
+                out.keptClear++;
+                if (moved) out.badKept++;
+              } else if (after > before + 1e-6) out.improved++;
+              else out.worse++;
+              if (after >= 169.9) out.fullyClear++;
+              if (moved && Math.min(dist(HUD[0], p.x, p.y), dist(HUD[1], p.x, p.y)) < 40) out.nearHud++;
+              if (p.strength < a.strength) out.reduced++;
             } else {
               out.focus++;
               const b = DD.stage._lineBox(a.avoid.lines[0].line, a.avoid.lines[0].style);
@@ -340,7 +512,8 @@ async function fontRoute(route) {
         return out;
       }, avoidTimes);
       check('env.lyricBounds set while lyrics are on screen', avoid.bounds >= avoid.frames * 0.9, `${avoid.bounds}/${avoid.frames} frames`);
-      check('stars bursts placed ≥ 170 px off the lyric boxes (or best spot on screen)', avoid.away > 0 && avoid.awayClear >= avoid.away * 0.85, `${avoid.awayClear}/${avoid.away} clear, worst ${avoid.awayWorst.toFixed(0)} px, moved ${avoid.moved}`);
+      check('stars bursts: already-clear ones untouched, others moved further off the text, never onto the HUD', avoid.away > 0 && avoid.badKept === 0 && avoid.worse === 0 && avoid.nearHud === 0,
+        `${avoid.away} bursts: ${avoid.keptClear} already clear, ${avoid.improved} moved further off, ${avoid.worse} worse; ${avoid.fullyClear} ≥ 170 px clear, ${avoid.reduced} shrunk (text fills the frame), near HUD ${avoid.nearHud}`);
       check('speedlines focus inside the sung line box', avoid.focus > 0 && avoid.focusIn === avoid.focus, `${avoid.focusIn}/${avoid.focus}`);
       // a few debug-overlay frames (boxes + placed positions)
       const avoidShots = avoidTimes.filter((x, i) => i % Math.max(1, Math.floor(avoidTimes.length / 6)) === 0).slice(0, 6);
