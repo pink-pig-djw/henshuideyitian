@@ -999,15 +999,16 @@ body.ui-hidden .banner, body.menu-open .banner { display: none; }
 .toasts {
   position: fixed;
   z-index: 1000;
-  top: max(14px, env(safe-area-inset-top));
-  right: max(14px, env(safe-area-inset-right));
+  left: max(16px, env(safe-area-inset-left));
+  bottom: calc(var(--bar-h) + 18px + env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: 10px;
-  max-width: min(440px, calc(100vw - 28px));
+  max-width: min(440px, calc(100vw - 32px));
   pointer-events: none;
 }
+body.menu-open .toasts, body.is-idle .toasts, body.ui-hidden .toasts { bottom: max(16px, env(safe-area-inset-bottom)); }
 .toast {
   position: relative;
   padding: 10px 16px 10px 16px;
@@ -1026,8 +1027,8 @@ body.ui-hidden .banner, body.menu-open .banner { display: none; }
 .toast.is-error { color: var(--white); background: var(--red); border-left-color: var(--ink); box-shadow: 6px 6px 0 var(--white); }
 .toast.is-ok { border-left-color: var(--ink); }
 .toast.is-leaving { animation: toast-out 0.18s ease-in both; }
-@keyframes toast-in { from { opacity: 0; transform: translateX(60px) skewX(-6deg) rotate(4deg); } }
-@keyframes toast-out { to { opacity: 0; transform: translateX(60px) skewX(-6deg); } }
+@keyframes toast-in { from { opacity: 0; transform: translateX(-60px) skewX(-6deg) rotate(-4deg); } }
+@keyframes toast-out { to { opacity: 0; transform: translateX(-60px) skewX(-6deg); } }
 
 .debug-box {
   position: fixed;
@@ -1077,8 +1078,9 @@ body.is-test *, body.is-test *::before, body.is-test *::after {
     grid-template-areas: "head" "list" "status";
     align-content: start;
     gap: 22px;
-    padding: max(20px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    padding: max(62px, calc(env(safe-area-inset-top) + 48px)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
   }
+  .menu-back { top: max(12px, env(safe-area-inset-top)); right: max(14px, env(safe-area-inset-right)); padding: 6px 9px 6px 12px; }
   .menu-slab, .menu-halftone { left: -30%; width: 118%; }
   .menu-stripe { left: auto; right: 8%; width: 10px; }
   .menu-head { gap: 12px; }
@@ -1135,7 +1137,7 @@ body.is-test *, body.is-test *::before, body.is-test *::after {
   .drop-card p { font-size: 28px; }
   .drop-card b { font-size: 46px; }
   .debug-box { font-size: 10px; }
-  .toasts { left: 14px; align-items: stretch; }
+  .toasts { left: 12px; right: 12px; align-items: stretch; max-width: none; }
   .osd-item { font-size: 18px; }
 }
 @media (max-height: 520px) and (min-width: 600px) {

@@ -1429,6 +1429,13 @@
         const mode = MV.Lyrics.detectMode ? MV.Lyrics.detectMode(text) : 'plain';
         const off = S.lyricOffset + (mode === 'plain' && preset ? po : 0);
         track = MV.Lyrics.parse(text, { preset, features: f, offset: off });
+        // Auto-timed lines sit on the feature grid (already in audio time) and
+        // Lyrics.parse does not shift them by `offset` when features are given:
+        // parse at 0 and apply only the user offset explicitly.
+        if (track && track.source === 'auto' && f && MV.Lyrics.withTimes) {
+          const base = off ? MV.Lyrics.parse(text, { preset, features: f, offset: 0 }) : track;
+          track = S.lyricOffset ? MV.Lyrics.withTimes(base, (t) => t + S.lyricOffset) : base;
+        }
       }
       if (track && MV.Lyrics.assignStyles) MV.Lyrics.assignStyles(track, f);
     } catch (e) {
@@ -1469,7 +1476,7 @@
    * opts: { source: 'paste'|'file'|'url'|'assets'|'storage'|'api', persist: true }
    */
   function setLyricsText(text, opts = {}) {
-    text = String(text == null ? '' : text).replace(/^﻿/, '');
+    text = String(text == null ? '' : text).replace(/^\uFEFF/, '');
     const changed = text !== S.lyricsText;
     S.lyricsText = text;
     S.lyricsSource = text ? opts.source || 'paste' : 'none';

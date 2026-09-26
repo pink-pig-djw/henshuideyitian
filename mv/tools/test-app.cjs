@@ -32,9 +32,8 @@ const args = Object.fromEntries(process.argv.slice(2).map((a) => a.replace(/^--/
 const PORT = +(args.port || process.env.MV_PORT || 8708);
 const BASE = `http://localhost:${PORT}/index.html`;
 const ONLY = args.only ? String(args.only).split(',') : null;
-const SCRATCH = '/tmp/claude-0/-home-user-henshuideyitian/fa2047da-052a-571c-86e1-0c494fa37d08/scratchpad';
-const LYRICS = process.env.MV_LYRICS || path.join(SCRATCH, 'lyrics_user_paste.txt');
-const LYRICS_CLEAN = process.env.MV_LYRICS_CLEAN || path.join(SCRATCH, 'lyrics_user.txt');
+const LYRICS = process.env.MV_LYRICS || '';
+const LYRICS_CLEAN = process.env.MV_LYRICS_CLEAN || '';
 const HAS_SONG = fs.existsSync(path.join(ROOT, 'assets', 'song.mp3'));
 
 // Invented placeholder lines (original, not from any song).
@@ -128,7 +127,7 @@ async function openPage(query, opts = {}) {
 }
 const state = (page) => page.evaluate(() => MV.app.getState());
 const shot = (page, name, dir = OUT) => page.screenshot({ path: path.join(dir, name + '.png') });
-const readLyrics = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null);
+const readLyrics = (p) => (p && fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null);
 const want = (name) => !ONLY || ONLY.includes(name);
 
 /* ------------------------------------------------------------------ */
@@ -180,6 +179,8 @@ async function testBootMenu() {
   const chooser = page.waitForEvent('filechooser', { timeout: 3000 }).catch(() => null);
   await page.click('.mi[data-act="play"]');
   check('PLAY without audio opens the audio picker', !!(await chooser));
+  await page.click('.menu-back');
+  check('BACK closes the menu', !(await state(page)).menu);
   check('zero console errors (boot/menu)', errors.length === 0, errors);
   await ctx.close();
 }
@@ -323,7 +324,7 @@ async function testRealSong() {
   }
   if (!txt && !clean) {
     const ls = await page.evaluate((t) => MV.app.setLyricsText(t), PLACEHOLDER);
-    check('placeholder lyrics applied (order fallback)', ls.lines > 0, ls);
+    check('placeholder lyrics applied (auto timing)', ls.lines > 0, ls);
   }
   await page.evaluate(() => MV.app.openMenu());
   await page.waitForTimeout(50);
@@ -506,6 +507,39 @@ async function testMissingModules() {
   await ctx.close();
 }
 
+async function testSyncPersist() {
+  if (!HAS_SONG) return;
+  console.log('\n[sync apply → persisted timing] placeholder lyrics');
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, proxy, ignoreHTTPSErrors: true });
+  await ctx.route(/^https:\/\/fonts\.(googleapis|gstatic)\.com\//, fontRoute);
+  let { page, errors } = await openPage('?test=1', { context: ctx });
+  await page.evaluate((t) => MV.app.setLyricsText(t, { persist: true }), PLACEHOLDER);
+  const before = await page.evaluate(() => MV.app.track.lines.map((l) => l.start));
+  await page.keyboard.press('s');
+  await page.waitForTimeout(150);
+  const applied = await page.evaluate(() => {
+    const ed = MV.app._state.sync;
+    ed.select(1);
+    ed.nudge(0.25);
+    ed.apply();
+    ed.close();
+    return MV.app.getState().lyrics;
+  });
+  const after = await page.evaluate(() => MV.app.track.lines.map((l) => l.start));
+  check('sync apply → track marked synced, line 2 moved +0.25 s', applied.synced && Math.abs(after[1] - before[1] - 0.25) < 0.02, { synced: applied.synced, d: +(after[1] - before[1]).toFixed(3) });
+  await page.close();
+  ({ page, errors } = await openPage('?test=1', { context: ctx }));
+  const st = await state(page);
+  const again = await page.evaluate(() => MV.app.track.lines.map((l) => l.start));
+  check('reload → synced timing restored', st.lyrics.synced && Math.abs(again[1] - after[1]) < 0.02, { synced: st.lyrics.synced, d: +(again[1] - after[1]).toFixed(3) });
+  await page.evaluate(() => MV.app.setLyricOffset(0.3));
+  const shifted = await page.evaluate(() => MV.app.track.lines.map((l) => l.start));
+  check('offset still applies on top of the synced timing', Math.abs(shifted[1] - again[1] - 0.3) < 0.02);
+  await page.evaluate(() => MV.app.setLyricOffset(0));
+  check('sync persist: zero console errors', errors.length === 0, errors);
+  await ctx.close();
+}
+
 /* ------------------------------------------------------------------ */
 (async () => {
   const server = await ensureServer();
@@ -516,7 +550,7 @@ async function testMissingModules() {
   const t0 = Date.now();
   const tests = [
     ['boot', testBootMenu], ['keys', testKeyboard], ['drop', testDragDrop], ['mobile', testMobile],
-    ['params', testParams], ['persist', testPersistence], ['missing', testMissingModules], ['real', testRealSong],
+    ['params', testParams], ['persist', testPersistence], ['missing', testMissingModules], ['sync', testSyncPersist], ['real', testRealSong],
   ];
   for (const [name, fn] of tests) {
     if (!want(name)) continue;

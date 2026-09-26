@@ -116,10 +116,11 @@ mv/
 ```
 # 界面测试（启动 / 菜单 / 快捷键 / 拖放 / 手机与桌面截图 / URL 参数 / 缓存 / 缺失模块 / 真实音频与导出）
 NODE_PATH=/opt/node22/lib/node_modules node mv/tools/test-app.cjs
-# 只跑一部分：--only=boot,keys,drop,mobile,params,persist,missing,real
+# 只跑一部分：--only=boot,keys,drop,mobile,params,persist,missing,sync,real
 ```
 
-截图输出到 `mv/out/app-ui/`。测试可以通过环境变量 `MV_LYRICS` 读取仓库外的本地歌词文件，只打印数量、不打印内容。
+截图输出到 `mv/out/app-ui/`。测试可以通过环境变量 `MV_LYRICS`（及 `MV_LYRICS_CLEAN`）读取仓库外的本地歌词文件，只打印数量、不打印内容；
+未提供时改用虚构的占位歌词。
 页面对测试暴露 `window.MV.app`：`loadAudioURL(url)`、`setLyricsText(text)`、`renderAt(t)`、`play()`、`pause()`、`seek(t)`、`getState()`、`exportVideo(opts)`。
 
 ---
