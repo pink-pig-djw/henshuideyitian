@@ -33,7 +33,13 @@
  * Accents: `stars` / `speedlines` accents that live while lyrics are on screen
  * carry `avoid = { mode: 'away' | 'focus', lines: [{ line, style, id }] }`;
  * the Stage turns the lines' layout bounds into a burst position off the text
- * ('away') or a focus on the sung line ('focus').
+ * ('away') or a focus on the sung line ('focus'). Speedline / ring colours
+ * follow the ground of the scene cue under them (sceneTone: 'sunburst' has a
+ * red, a black and a blood scheme by variant % 3), so they always contrast.
+ *
+ * Lyric windows: consecutive lines overlap ≤ 0.25 s (only when a line is too
+ * short to clear before the next enters); the outgoing exit ramp (lt.out,
+ * normally 0.35 s) is then shortened by the overlap, to ≥ 0.18 s.
  *
  * Works without MV.Analysis (small internal fallbacks), without features
  * (preset grid + synthetic envelopes) and without a track (no lyrics).
@@ -112,10 +118,28 @@
 
   // Scenes whose palette is mostly red / white (speedlines turn black there).
   const BRIGHT_SCENES = new Set(['sunburst', 'sky-red', 'stripes']);
+  /**
+   * Background tone of a scene cue, for accent colours that must contrast:
+   * 'bright' (red / white ground), 'dark' (black) or 'deep' (blood red).
+   * 'sunburst' picks its scheme by variant % 3 (scenes.js SB_SCHEMES: red,
+   * black, blood), so only scheme 0 is bright.
+   */
+  function sceneTone(cue) {
+    if (!cue) return 'dark';
+    if (cue.name === 'sunburst') return ['bright', 'dark', 'deep'][mod(cue.variant | 0, 3)];
+    return BRIGHT_SCENES.has(cue.name) ? 'bright' : 'dark';
+  }
+  // Accent colours per tone: speedlines black only on a bright ground; rings
+  // white on bright / blood grounds (a red ring vanishes into red / blood).
+  const SPEED_COLOR = { bright: 'black', dark: 'white', deep: 'white' };
+  const RING_COLOR = { bright: 'white', dark: 'red', deep: 'white' };
   const STAR_SCENES = new Set(['starfield', 'void']);
 
   const LYRIC_IN = 0.3, LYRIC_OUT = 0.35, LYRIC_GAP = 0.05, LYRIC_LONG_GAP = 3.0, LYRIC_TAIL = 1.4;
-  const MAX_LYRIC_OVERLAP = 0.35;
+  // Outgoing / incoming lines overlap at most this long (only when a line is
+  // too short to clear the stage before the next one enters); the outgoing
+  // exit is then shortened so the two animations barely run together.
+  const MAX_LYRIC_OVERLAP = 0.25, MIN_LYRIC_OUT = 0.18;
 
   const ZERO_BEAT = {
     index: 0, phase: 0, period: 0.6, bar: 0, barPhase: 0, beatInBar: 0,
@@ -450,6 +474,9 @@
       se = Math.max(se, c.start + 0.3, c.showStart + 0.5);
       if (nx) se = Math.min(se, nx.showStart + MAX_LYRIC_OVERLAP);
       c.showEnd = Math.min(se, this.duration + 0.5);
+      // exit ramp: LYRIC_OUT, minus the overlap with the next line's entrance
+      const ov = nx ? c.showEnd - nx.showStart : 0;
+      c.outDur = ov > 0 ? Math.max(MIN_LYRIC_OUT, LYRIC_OUT - ov) : LYRIC_OUT;
     }
     this.lyricCues = cues;
     this._lyrStarts = Float64Array.from(cues.map((c) => c.showStart));
@@ -600,7 +627,7 @@
       return a;
     };
     const shake = (t, amp, dur) => cam.push({ kind: 'shake', t, amp, dur: dur || 0.3, seed: hash(this.seed, 'shake', t) });
-    const sceneAt = (t) => this.sceneCueAt(t);
+    const toneAt = (t) => sceneTone(this.sceneCueAt(t));
 
     if (o.accents !== false) {
       // Section starts (on their cut = true downbeat): shards (loud) or ink
@@ -656,15 +683,13 @@
             // burst from an upper corner so the pop never sits on the text
             const side = rnd(sd, 1) < 0.5 ? 0.1 : 0.9;
             add('stars', t, { strength: 0.55 + 0.35 * I, x: W * (side + 0.03 * MV.srand(sd, 2)), y: H * (0.17 + 0.04 * MV.srand(sd, 5)) });
-            const bright = BRIGHT_SCENES.has(sceneAt(t).name);
-            add('ring', t, { strength: 0.6 + 0.5 * I, x: W / 2, y: H * 0.5, data: { color: bright ? 'white' : 'red' } });
+            add('ring', t, { strength: 0.6 + 0.5 * I, x: W / 2, y: H * 0.5, data: { color: RING_COLOR[toneAt(t)] } });
             shake(t, 7 * I, 0.3);
           } else if (I >= 0.7) {
-            const bright = BRIGHT_SCENES.has(sceneAt(t).name);
             add('speedlines', t, {
               strength: 0.55 + 0.45 * I,
               x: W / 2 + 160 * MV.srand(sd, 3), y: H * 0.48 + 70 * MV.srand(sd, 4),
-              data: { color: bright ? 'black' : 'white' },
+              data: { color: SPEED_COLOR[toneAt(t)] },
             });
             shake(t, 8 * I, 0.28);
           }
@@ -709,12 +734,12 @@
           const d = D[k];
           if (visibleAt(d)) continue;
           const sd = hash(sec.seed, 'adlib', k);
-          const bright = BRIGHT_SCENES.has(sceneAt(d).name);
+          const tone = toneAt(d);
           if (m++ % 2 === 0) {
-            add('speedlines', d, { strength: 0.55 + 0.35 * sec.intensity, x: W / 2 + 200 * MV.srand(sd, 1), y: H * 0.5 + 90 * MV.srand(sd, 2), data: { color: bright ? 'black' : 'white' } });
+            add('speedlines', d, { strength: 0.55 + 0.35 * sec.intensity, x: W / 2 + 200 * MV.srand(sd, 1), y: H * 0.5 + 90 * MV.srand(sd, 2), data: { color: SPEED_COLOR[tone] } });
             shake(d, 7 * sec.intensity, 0.25);
           } else {
-            add('ring', d, { strength: 0.6 + 0.4 * sec.intensity, x: W * (0.3 + 0.4 * rnd(sd, 3)), y: H * (0.35 + 0.3 * rnd(sd, 4)), data: { color: bright ? 'white' : 'red' } });
+            add('ring', d, { strength: 0.6 + 0.4 * sec.intensity, x: W * (0.3 + 0.4 * rnd(sd, 3)), y: H * (0.35 + 0.3 * rnd(sd, 4)), data: { color: RING_COLOR[tone] } });
           }
         }
       }
@@ -989,7 +1014,7 @@
           lt: {
             t: t - c.start,
             in: clamp((t - c.showStart) / LYRIC_IN),
-            out: clamp((t - (c.showEnd - LYRIC_OUT)) / LYRIC_OUT),
+            out: clamp((t - (c.showEnd - c.outDur)) / c.outDur),
             showStart: c.showStart,
             showEnd: c.showEnd,
           },

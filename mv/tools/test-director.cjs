@@ -299,6 +299,18 @@ function suite(label, dir, o = {}) {
   check(`${label}: glitch spikes only in pre/build/climax`, cues.glitches.every((g) => /pre|build|climax/.test(secOf(g.t).kind)), `${cues.glitches.length} spikes`);
   check(`${label}: frame / flash accents only in choruses`, byKind('frame').concat(byKind('flash')).every((a) => /chorus|climax/.test(secOf(a.t).kind)), `frame=${byKind('frame').length} flash=${byKind('flash').length}`);
   check(`${label}: speedlines only at intensity ≥ 0.7`, byKind('speedlines').every((a) => dir.intensityAt(a.t) >= 0.7), `${byKind('speedlines').length}`);
+  {
+    // Accent colours contrast with the scene ground under them. 'sunburst'
+    // has three schemes (variant % 3: red, black, blood): black speedlines /
+    // red rings only where they can be seen.
+    const tone = (c) => (c.name === 'sunburst' ? ['bright', 'dark', 'deep'][MV.mod(c.variant, 3)] : /^(sky-red|stripes)$/.test(c.name) ? 'bright' : 'dark');
+    const okCol = { speedlines: { bright: ['black'], dark: ['white', 'red'], deep: ['white'] }, ring: { bright: ['white', 'black'], dark: ['red', 'white'], deep: ['white', 'black'] } };
+    const tested = acc.filter((a) => okCol[a.kind] && a.data && a.data.color);
+    const badCol = tested.filter((a) => okCol[a.kind][tone(dir.sceneCueAt(a.t))].indexOf(a.data.color) < 0);
+    const sbTones = new Set(sc.filter((c) => c.name === 'sunburst').map(tone));
+    check(`${label}: speedlines / ring colours contrast with the scene scheme (sunburst red / black / blood)`, badCol.length === 0,
+      `${tested.length} accents, sunburst schemes used: ${[...sbTones].join('/')}` + (badCol.length ? ' bad: ' + badCol.slice(0, 4).map((a) => `${a.kind}@${f3(a.t)} ${a.data.color} on ${dir.sceneCueAt(a.t).name} v${dir.sceneCueAt(a.t).variant}`).join(', ') : ''));
+  }
   const secStarts = acc.filter((a) => (a.kind === 'ink' || a.kind === 'shards') && S.some((s) => Math.abs(s.cut - a.t) < 0.1));
   check(`${label}: ink / shards at section starts`, secStarts.length >= S.length - 2, `${secStarts.length} of ${S.length - 1}`);
   if (o.lyrics) {
@@ -373,7 +385,7 @@ function suite(label, dir, o = {}) {
     prevIds = st.lyrics.map((l) => l.line.id);
   }
   void prevIds;
-  check(`${label}: ≤ 2 lyric lines at once, overlap ≤ 0.35 s`, maxLyr <= 2 && maxOverlap <= 0.36, `max=${maxLyr} overlap=${f3(maxOverlap)}`);
+  check(`${label}: ≤ 2 lyric lines at once, overlap ≤ 0.25 s`, maxLyr <= 2 && maxOverlap <= 0.26, `max=${maxLyr} overlap=${f3(maxOverlap)}`);
   check(`${label}: lt in/out in 0..1 and inside the show window`, badLt === 0, `bad=${badLt}`);
   check(`${label}: env fields in range`, !badEnv, badEnv || undefined);
   check(`${label}: camera bounded (|x|<45, |y|<40, zoom 0.99..1.12)`, !badCam, badCam || undefined);
@@ -426,7 +438,7 @@ function suite(label, dir, o = {}) {
   for (let i = 0; i < L.length; i++) {
     const c = L[i], nx = L[i + 1];
     const want = !nx || nx.showStart - c.end > 3 ? c.end + 1.4 : nx.showStart - 0.05;
-    const w2 = Math.min(Math.max(want, c.start + 0.3, c.showStart + 0.5), nx ? nx.showStart + 0.35 : Infinity, dir.duration + 0.5);
+    const w2 = Math.min(Math.max(want, c.start + 0.3, c.showStart + 0.5), nx ? nx.showStart + 0.25 : Infinity, dir.duration + 0.5);
     if (Math.abs(c.showEnd - w2) > 1e-6) {
       winOk = false;
       winDetail = `${c.id}: ${f3(c.showEnd)} vs ${f3(w2)}`;
@@ -440,6 +452,19 @@ function suite(label, dir, o = {}) {
   const l2 = st2.lyrics.find((l) => l.line.id === L[2].id);
   check('lt.out ramps over the last 0.35 s', l2 && Math.abs(l2.lt.out - 0.5) < 1e-6, l2 ? `out=${f3(l2.lt.out)}` : 'none');
   check('line style passed through', st1.lyrics.every((l) => l.style === l.line.style), st1.lyrics.map((l) => l.style).join(','));
+  {
+    // A line too short to clear the stage before the next one enters: overlap
+    // capped at 0.25 s and its exit shortened (no long exit/entrance pile-up).
+    const base = syntheticTrack();
+    const A = Object.assign({}, base.lines[2], { start: 20, end: 20.4, showStart: 19.9 });
+    const B = Object.assign({}, base.lines[3], { start: 20.35, end: 23, showStart: 20.05 });
+    const d2 = new MV.Director({ features, track: Object.assign({}, base, { lines: [A, B] }), preset });
+    const [ca, cb] = d2.cues.lyrics;
+    const ov = ca.showEnd - cb.showStart;
+    const sq = d2.evaluate(ca.showEnd - ca.outDur / 2).lyrics.find((l) => l.line === ca.line);
+    check('squeezed lines: overlap ≤ 0.25 s, outgoing exit shortened to ≥ 0.18 s', ov <= 0.25 + 1e-9 && ca.outDur < 0.35 && ca.outDur >= 0.18 - 1e-9 && sq && Math.abs(sq.lt.out - 0.5) < 1e-6 && cb.outDur === 0.35,
+      `overlap ${f3(ov)} s, exit ${f3(ca.outDur)} s, out@mid ${sq ? f3(sq.lt.out) : '-'}`);
+  }
 
   // intensity cross-fade at a boundary (pre → chorus)
   const ci = preset.sections.findIndex((x) => x.kind === 'chorus');

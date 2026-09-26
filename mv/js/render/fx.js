@@ -785,8 +785,22 @@
     const outer = ctx;
     ctx = lctx;
     const lk = layer.canvas.width / W;
+    // Clear the reused layer in two halves, never with one full-canvas
+    // clearRect: Chrome treats a full-canvas clear as "overwrite everything"
+    // (queued draws discarded, no op recorded), and when no shard then lands
+    // inside the layer (late in the transition every moving shard can be off
+    // frame while its bounding circle still overlaps it) the next
+    // drawImage(layer) was served the layer's cached snapshot — the shards of
+    // whichever shatter frame was rendered before. Frames then depended on
+    // render history (sequential export ≠ seek; ghost shards on playback).
+    // Partial clears are recorded as ordinary draws, so the snapshot is always
+    // refreshed and the layer content is a pure function of this call.
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    const lw = layer.canvas.width, lh = layer.canvas.height, lh2 = lh >> 1;
+    ctx.clearRect(0, 0, lw, lh2);
+    ctx.clearRect(0, lh2, lw, lh - lh2);
     ctx.setTransform(lk, 0, 0, lk, 0, 0);
     let bx0 = W, by0 = H, bx1 = 0, by1 = 0; // bounds of what was drawn (logical px)
     // flying shards, far (outer) first so inner ones fly over them

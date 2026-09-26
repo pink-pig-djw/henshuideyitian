@@ -8,9 +8,6 @@
  *     --only=perf            init + fonts + perf only
  *     --no-sheets            skip contact sheets / filmstrips / full frames
  *     --stage-src=<file>     serve this file as js/stage.js (before/after perf of another Stage)
- *     --shim-shard-layer     emulate the proposed fx.js fix (CPU-backed shatter shard layer,
- *                            getContext('2d', { willReadFrequently: true })) — see the
- *                            determinism checks: without it, `shatter` frames depend on history
  *   MV_LYRICS=/path/outside/repo.txt …  → additionally renders with those lyrics into out/director/real/
  *
  * Writes to mv/out/director/ (git-ignored):
@@ -57,7 +54,6 @@ fs.mkdirSync(CACHE, { recursive: true });
 const FRAMES = +arg('frames', 180);
 const ONLY = String(arg('only', '') || '');
 const STAGE_SRC = arg('stage-src', null);
-const SHIM = !!arg('shim-shard-layer', false);
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -140,18 +136,6 @@ async function fontRoute(route) {
     await context.route(/\/js\/stage\.js(\?.*)?$/, (r) => r.fulfill({ status: 200, body, headers: { 'content-type': 'text/javascript' } }));
     console.log('INFO  js/stage.js served from ' + STAGE_SRC);
   }
-  if (SHIM) {
-    // fx.js allocates its half-res shatter layer (960×540, alpha) with MV.makeCanvas;
-    // back exactly that canvas with a CPU context (the proposed one-line fx.js fix).
-    await context.addInitScript(() => {
-      const g = HTMLCanvasElement.prototype.getContext;
-      HTMLCanvasElement.prototype.getContext = function (type, opts) {
-        if (type === '2d' && this.width === 960 && this.height === 540 && !(opts && opts.alpha === false)) opts = Object.assign({}, opts || {}, { willReadFrequently: true });
-        return g.call(this, type, opts);
-      };
-    });
-    console.log('INFO  --shim-shard-layer: fx.js shatter layer CPU-backed');
-  }
   const page = await context.newPage();
   const pageErrors = [];
   const warnings = [];
@@ -195,17 +179,18 @@ async function fontRoute(route) {
       return out;
     });
 
-    // Runs first, on the fresh page: the fx.js layer problem below depends on the
-    // GPU canvas state, which the other checks' renders change.
+    // Runs first, on the fresh page (no shatter frame rendered yet).
     if (ONLY !== 'perf') {
-    // fx.js shatter: its flying shards go through a reused module-level layer.
-    // After a long render history Chrome's GPU canvas keeps showing the previous
-    // frame's shards (a full-canvas clearRect on the reused layer is lost), so
-    // the same frame renders differently depending on what was rendered before.
-    // Fix proposed for fx.js: back that layer with getContext('2d', { willReadFrequently: true })
-    // (emulated by --shim-shard-layer).
+    // fx.js shatter: flying shards go through a reused module-level half-res
+    // layer. Its old full-canvas clearRect took Chrome's "overwrite" fast path;
+    // when no shard then landed inside the layer (late in the transition every
+    // moving shard can be off frame), the next drawImage(layer) was served the
+    // layer's cached snapshot: the shards of the previously rendered shatter
+    // frame. Each probe frame is rendered after an unrelated frame (seek) and
+    // right after an earlier frame of the same shatter (playback); both must
+    // match. Late frames (p 0.7 … 0.93) are the ones that used to break.
     const shat = await page.evaluate(() => {
-      const DD = window.DD, S = DD.stage, MV = window.MV;
+      const DD = window.DD, S = DD.stage;
       const sh = DD.director.cues.scenes.filter((c) => c.transition && c.transition.name === 'shatter');
       const k = document.createElement('canvas');
       k.width = S.canvas.width;
@@ -213,18 +198,26 @@ async function fontRoute(route) {
       const kx = k.getContext('2d', { willReadFrequently: true });
       const px = () => (kx.drawImage(S.canvas, 0, 0), kx.getImageData(0, 0, k.width, k.height).data);
       const at = (c, f) => c.transition.start + (c.transition.end - c.transition.start) * f;
-      const clean = sh.map((c) => (S.renderFrame(at(c, 0.95)), px()));
-      for (let i = 0; i < 160; i++) S.renderFrame((i * 1.3831) % 221);
-      return sh.map((c, j) => {
-        S.renderFrame(at(c, 0.95)); // shards gone: only the frame itself should matter
-        const after = px(), ref = clean[j];
-        let big = 0;
-        for (let q = 0; q < ref.length; q += 4) if (Math.max(Math.abs(ref[q] - after[q]), Math.abs(ref[q + 1] - after[q + 1]), Math.abs(ref[q + 2] - after[q + 2])) > 24) big++;
-        return { cut: +c.cut.toFixed(2), big };
+      const FR = [0.3, 0.55, 0.7, 0.76, 0.85, 0.93];
+      return sh.map((c) => {
+        let big = 0, frames = 0;
+        for (const f of FR) {
+          S.renderFrame(10.0);
+          S.renderFrame(at(c, f));
+          const seek = px();
+          S.renderFrame(at(c, f - 0.1));
+          S.renderFrame(at(c, f));
+          const seq = px();
+          let n = 0;
+          for (let q = 0; q < seek.length; q += 4) if (Math.max(Math.abs(seek[q] - seq[q]), Math.abs(seek[q + 1] - seq[q + 1]), Math.abs(seek[q + 2] - seq[q + 2])) > 24) n++;
+          big = Math.max(big, n);
+          frames++;
+        }
+        return { cut: +c.cut.toFixed(2), frames, big };
       });
     });
-    check('shatter frames independent of render history (fx.js reused shard layer)', shat.every((r) => r.big <= 200),
-      shat.map((r) => `@${r.cut}: ${r.big} px differ`).join(' ') + (SHIM ? ' [--shim-shard-layer]' : ''));
+    check('shatter frames independent of render history (seek = playback, fx.js reused shard layer)', shat.length > 0 && shat.every((r) => r.big <= 200),
+      shat.map((r) => `@${r.cut}: ${r.frames} frames, worst ${r.big} px Δ>24`).join(' '));
 
     }
 
