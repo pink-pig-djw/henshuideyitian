@@ -888,6 +888,52 @@
   function halftoneSprite(w, h, o) {
     return sprite(w, h, (c) => D.halftone(c, 0, 0, w, h, o));
   }
+  // One quadrant of a radial halftone (45° screen anchored on the centre, so
+  // it mirrors seamlessly), dots shrinking to nothing at QUAD.R. One sprite per
+  // colour serves every radial and corner halftone (shards, stripes, void),
+  // drawn mirrored as needed — a quarter of the memory of a full disc.
+  const QUAD = { R: 842, cell: 24 };
+  const quadCache = new Map();
+  function radialQuad(color) {
+    if (!quadCache.has(color)) {
+      quadCache.set(color, attributed('shared', () => sprite(QUAD.R, QUAD.R, (c) => {
+        const h = QUAD.cell / Math.SQRT2;
+        c.fillStyle = color;
+        c.beginPath();
+        for (let m = 0; m * h < QUAD.R + QUAD.cell; m++) {
+          for (let n = m & 1; n * h < QUAD.R + QUAD.cell; n += 2) {
+            const x = m * h, y = n * h;
+            const r = 1.05 * clamp(1 - Math.hypot(x, y) / QUAD.R) * QUAD.cell * 0.62;
+            if (r < 0.4) continue;
+            c.moveTo(x + r, y);
+            c.arc(x, y, r, 0, TAU);
+          }
+        }
+        c.fill();
+      })));
+    }
+    return quadCache.get(color);
+  }
+  // Draws the quadrant with its centre at (x, y), pointing along (sx, sy) = ±1.
+  function drawQuad(ctx, img, x, y, sx, sy) {
+    x = Math.round(x);
+    y = Math.round(y);
+    if (sx > 0 && sy > 0) {
+      ctx.drawImage(img, x, y);
+      return;
+    }
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(sx, sy);
+    ctx.drawImage(img, 0, 0);
+    ctx.restore();
+  }
+  function drawRadialHalftone(ctx, img, x, y) {
+    drawQuad(ctx, img, x, y, 1, 1);
+    drawQuad(ctx, img, x, y, -1, 1);
+    drawQuad(ctx, img, x, y, 1, -1);
+    drawQuad(ctx, img, x, y, -1, -1);
+  }
   // Vertical halftone ramps as repeating patterns: a 45° screen repeats every
   // cell·√2 horizontally, so a narrow tile replaces a full-width sprite
   // (a few KB instead of ~8 MB, and an axis-aligned pattern fill is cheap).
@@ -1016,7 +1062,7 @@
     rampTile('nc-sky-navy');
     return {
       far: sharedSkyline('far'), mid: sharedSkyline('mid'), near: sharedSkyline('near'),
-      moon: { red: moonSprite('red', 250), navy: moonSprite('navy', 250) },
+      moon: { red: moonSprite('red'), navy: moonSprite('navy') },
     };
   }
   // Cream halftone moons, shared by night-city / crowd / sky-red. Always a
@@ -1025,11 +1071,11 @@
     red: { disc: C.star, dots: C.black, ring: C.black, shadow: C.black },
     navy: { disc: C.star, dots: C.navy, ring: null, shadow: C.red },
   };
+  const MOON_R = 280; // one size for every scene: two sprites in total
   const moonCache = new Map();
-  function moonSprite(kind, r) {
-    const key = kind + '|' + r;
-    if (!moonCache.has(key)) moonCache.set(key, attributed('shared', () => makeMoon(r, MOONS[kind])));
-    return moonCache.get(key);
+  function moonSprite(kind) {
+    if (!moonCache.has(kind)) moonCache.set(kind, attributed('shared', () => makeMoon(MOON_R, MOONS[kind])));
+    return moonCache.get(kind);
   }
   function makeMoon(r, P) {
     const pad = 22, S = 2 * r + 2 * pad;
@@ -1049,7 +1095,7 @@
         fn: (u, v) => clamp((Math.hypot(u - 0.82, v - 0.2) - 0.52) * 2.1),
       });
       // flat craters
-      c.fillStyle = rgba(P.dots, 0.16);
+      c.fillStyle = rgba(P.dots, 0.22);
       const cr = [[0.35, 0.4, 0.13], [0.55, 0.62, 0.08], [0.62, 0.3, 0.06], [0.3, 0.7, 0.07], [0.72, 0.5, 0.05]];
       for (const k of cr) {
         circle(c, cx - r + k[0] * 2 * r, cy - r + k[1] * 2 * r, k[2] * 2 * r);
@@ -1100,6 +1146,25 @@
     }
     ctx.globalAlpha = 1;
   }
+  // Smooth, broken orbit arcs around a moon (a lunar halo, never a corona or
+  // rays): three concentric segments turning at different speeds, kicking out
+  // on the beat.
+  function haloArcs(ctx, cx, cy, r0, gap, B, tau, color, alpha, lw) {
+    ctx.strokeStyle = color;
+    ctx.lineCap = 'butt';
+    for (let j = 0; j < 3; j++) {
+      const r = r0 + j * gap + (6 + 6 * j) * B.pulse;
+      const a0 = tau * (0.07 + 0.05 * j) * (j & 1 ? -1 : 1) + j * 2.1;
+      ctx.globalAlpha = alpha * (1 - j * 0.25);
+      ctx.lineWidth = lw * (1 - j * 0.25);
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, a0, a0 + 2.2 + 0.5 * j);
+      ctx.moveTo(cx + Math.cos(a0 + 3.2) * r, cy + Math.sin(a0 + 3.2) * r);
+      ctx.arc(cx, cy, r, a0 + 3.2, a0 + 4.1 + 0.4 * j);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
   function drawNightCity(ctx, env, p, K) {
     const B = beatOf(env), I = p.intensity, v = p.variant, q = env.quality || 1;
     const redSky = I >= 0.5 ? v % 3 !== 2 : v % 3 === 2;
@@ -1117,25 +1182,25 @@
     }
     const mx = Math.round(1100 + rand(p.seed, 2) * 460), my = Math.round(230 + rand(p.seed, 3) * 110);
     if (I > 0.4) {
-      shockRings(ctx, mx, my, B, p.seed, { color: P.rings, r0: 400, gap: 90, n: 4, kick: 14, amp: 12, tooth: 46, lw: 10, rot: tau * 0.02, alpha: clamp((I - 0.4) * 2.5) * (redSky ? 0.9 : 0.7) });
+      haloArcs(ctx, mx, my, MOON_R + 130, 70, B, tau, P.rings, clamp((I - 0.4) * 2.5) * (redSky ? 0.9 : 0.7), 10);
     }
     // orbit arcs around the moon (rotating slowly, kick on the downbeat)
     ctx.strokeStyle = P.orbit;
     const orb = tau * 0.12 + 0.25 * E.outBack(clamp(B.sinceDownbeat / 0.3));
     ctx.lineWidth = 14;
     ctx.beginPath();
-    ctx.arc(mx, my, 318 + 10 * B.barPulse, orb, orb + 4.1);
+    ctx.arc(mx, my, MOON_R + 50 + 10 * B.barPulse, orb, orb + 4.1);
     ctx.stroke();
     ctx.lineWidth = 4;
     ctx.beginPath();
-    ctx.arc(mx, my, 350 + 16 * B.barPulse, -orb * 1.3 + 1, -orb * 1.3 + 3.6);
+    ctx.arc(mx, my, MOON_R + 82 + 16 * B.barPulse, -orb * 1.3 + 1, -orb * 1.3 + 3.6);
     ctx.stroke();
     drawMoon(ctx, K.moon[P.moon], mx, my);
     if (B.barPulse > 0.02) {
       ctx.globalAlpha = B.barPulse * 0.7;
       ctx.strokeStyle = P.pulse;
       ctx.lineWidth = 6;
-      circle(ctx, mx, my, 262 + (1 - B.barPulse) * 150);
+      circle(ctx, mx, my, MOON_R + 12 + (1 - B.barPulse) * 150);
       ctx.stroke();
       ctx.globalAlpha = 1;
     }
@@ -1756,9 +1821,12 @@
   function studentShapes() {
     if (studentCache) return studentCache;
     const body = new Path2D();
+    kitBounds(true);
     for (const k of ['hair', 'head', 'neck', 'blazer', 'legL', 'legR', 'shoeL', 'shoeR', 'handL', 'bag']) blob(body, STU[k]);
     limb(body, STU.armL);
     limb(body, STU.armR);
+    const bounds = kitBounds(false);
+    KB = null;
     const lines = new Path2D();
     for (const l of STU.lines) {
       lines.moveTo(l[0][0], l[0][1]);
@@ -1768,8 +1836,42 @@
     for (const d of STU.dots) disc(dots, d[0], d[1], 0.007);
     const wrap = new Path2D();
     blob(wrap, STU.wrap);
-    studentCache = { body, lines, dots, wrap };
+    studentCache = { body, lines, dots, wrap, bounds };
     return studentCache;
+  }
+  // The static part of the student (rim light, silhouette, red tailoring
+  // details) as one sprite at height h, lit from the left (mirrored when the
+  // wind blows the other way). Feet centre at (ax, ay).
+  function studentSprite(h, rimCol) {
+    const S = studentShapes(), b = S.bounds;
+    const pad = 14;
+    const x0 = Math.floor(b[0] * h) - pad - 8, x1 = Math.ceil(b[2] * h) + pad;
+    const y0 = Math.floor(b[1] * h) - pad - 4, y1 = Math.ceil(b[3] * h) + pad;
+    const ax = -x0, ay = -y0, px = 1 / h;
+    const cv = sprite(x1 - x0, y1 - y0, (c) => {
+      c.translate(ax, ay);
+      c.scale(h, h);
+      c.lineJoin = 'round';
+      c.lineCap = 'round';
+      // red rim light: a thin outline all round (backlit by the moon) plus a
+      // stronger offset rim on the lit side
+      c.strokeStyle = rimCol;
+      c.lineWidth = 7 * px;
+      c.stroke(S.body);
+      c.fillStyle = rimCol;
+      c.translate(-8 * px, -4 * px);
+      c.fill(S.body);
+      c.translate(8 * px, 4 * px);
+      c.fillStyle = C.black;
+      c.fill(S.body);
+      // tailoring details in red
+      c.strokeStyle = rimCol;
+      c.lineWidth = 3.2 * px;
+      c.stroke(S.lines);
+      c.fillStyle = rimCol;
+      c.fill(S.dots);
+    });
+    return { cv, ax, ay };
   }
   // One scarf tail: a long ribbon streaming down-wind with a travelling wave and
   // a swallow-tail tip (reads as cloth, not as a limb). Unit space.
@@ -1792,14 +1894,14 @@
     for (const q of pts) q[0] *= wind;
     D.polygon(ctx, pts);
   }
-  // Draws the student with feet at (x, footY), height h px.
-  function drawStudent(ctx, x, footY, h, tau, wind, B, rimCol) {
+  // Draws the student with feet at (x, footY): scarf tails (behind), the body
+  // sprite, then the scarf wrap and its short front end (animated per frame).
+  function drawStudent(ctx, spr, x, footY, h, tau, wind, B) {
     const S = studentShapes();
     const px = 1 / h;
-    const breathe = 1 + 0.004 * Math.sin(tau * 1.7);
     ctx.save();
     ctx.translate(x, footY);
-    ctx.scale(h, h * breathe);
+    ctx.scale(h, h);
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
     // scarf tails behind the body (knot on the down-wind side of the neck)
@@ -1815,27 +1917,11 @@
       ctx.fill();
       ctx.stroke();
     }
-    // red rim light: an outline all round (backlit by the moon) plus a
-    // stronger offset rim on the up-wind side
-    ctx.strokeStyle = rimCol;
-    ctx.lineWidth = 7 * px;
-    ctx.stroke(S.body);
-    ctx.fillStyle = rimCol;
-    ctx.translate(-8 * px * wind, -4 * px);
-    ctx.fill(S.body);
-    ctx.translate(8 * px * wind, 4 * px);
-    ctx.fillStyle = C.black;
-    ctx.fill(S.body);
-    // tailoring details in red
-    ctx.strokeStyle = rimCol;
-    ctx.lineWidth = 3.2 * px;
-    ctx.stroke(S.lines);
-    ctx.fillStyle = rimCol;
-    ctx.fill(S.dots);
+    ctx.save();
+    ctx.scale(wind * px, px);
+    ctx.drawImage(spr.cv, -spr.ax, -spr.ay);
+    ctx.restore();
     // scarf wrap + short front end swinging on the beat
-    ctx.fillStyle = C.red;
-    ctx.strokeStyle = C.black;
-    ctx.lineWidth = 4 * px;
     ctx.save();
     ctx.scale(wind, 1);
     scarfTail(ctx, tau * 0.6, 0.15, 1.3, 0.036, -0.81, 1, 1.35 + 0.08 * Math.sin(tau * 2.3) - 0.1 * B.pulse, 0.038);
@@ -1862,43 +1948,62 @@
     red: { '@body': C.blood, '@w0': C.redDeep, '@w1': C.red },
     night: { '@body': mix(C.navy, C.night, 0.6), '@w0': mix(C.navy, C.star, 0.3), '@w1': C.redDeep },
   };
+  const CROWD_H = 540; // shared walker sprite height (row 2; row 1 is drawn scaled down)
   function buildCrowd() {
     rampTile('crowd-red');
     rampTile('crowd-night');
-    for (let type = 0; type < 6; type++) for (let pose = 0; pose < 2; pose++) walkerShape(type, pose);
-    studentShapes();
-    return { moon: { red: moonSprite('red', 330), navy: moonSprite('navy', 330) }, far: sharedSkyline('far') };
+    const K = { moon: { red: moonSprite('red'), navy: moonSprite('navy') }, far: sharedSkyline('far') };
+    // walker sprites: one shared set (black / red rim) for rows 1–2 and the far
+    // row in two depth tints; row 3 (huge, ≤ 2 walkers) is drawn as vector paths
+    K.near = [];
+    K.farRed = [];
+    K.farNight = [];
+    const r0 = CROWD_ROWS[0];
+    for (let type = 0; type < 6; type++) {
+      K.near[type] = [0, 1].map((pose) => walkerSprite(type, pose, CROWD_H, CROWD_ROWS[2].rim, C.black, C.red));
+      K.farRed[type] = [0, 1].map((pose) => walkerSprite(type, pose, r0.h, r0.rim, C.blood, C.redHot));
+      K.farNight[type] = [0, 1].map((pose) => walkerSprite(type, pose, r0.h, r0.rim, C.night, C.redDeep));
+    }
+    K.student = studentSprite(660, C.red);
+    return K;
   }
-  function drawWalker(ctx, shape, x, y, h, dir, rim, rimCol, body) {
-    ctx.save();
-    ctx.translate(x + rim, y - rim * 0.6);
-    ctx.scale(h * dir, h);
-    ctx.fillStyle = rimCol;
-    ctx.fill(shape);
-    ctx.restore();
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.scale(h * dir, h);
-    ctx.fillStyle = body;
-    ctx.fill(shape);
-    ctx.restore();
-  }
-  function drawCrowdRow(ctx, ri, tau, p, B, I, q, speedK, night) {
+  function drawCrowdRow(ctx, K, ri, tau, p, B, I, q, speedK, night) {
     const row = CROWD_ROWS[ri];
     const M = row.margin || 320;
     const span = W + 2 * M;
     const n = ri === 3 ? (I > 0.6 ? 2 : 1) : Math.max(1, Math.round(row.n * (0.55 + 0.6 * I) * (ri < 2 ? q : 1)));
-    const body = row.tint ? (night ? C.night : C.blood) : C.black;
-    const rimCol = row.tint ? (night ? C.redDeep : C.redHot) : C.red;
+    const set = ri === 0 ? (night ? K.farNight : K.farRed) : K.near;
+    const k0 = row.h / (ri === 0 ? row.h : CROWD_H);
     for (let k = 0; k < n; k++) {
       const x0 = (k / n) * span + srand(p.seed, ri * 50 + k, 1) * (span / n) * 0.35;
-      const x = mod(x0 + row.dir * row.v * speedK * tau, span) - M;
+      const x = Math.round(mod(x0 + row.dir * row.v * speedK * tau, span) - M);
       const type = Math.floor(rand(p.seed, ri * 50 + k, 2) * 6);
       const pose = (B.index + k + ri) & 1;
-      const hh = row.h * (0.94 + 0.12 * rand(p.seed, ri * 50 + k, 3));
-      const bob = pose === 1 ? -hh * 0.012 : 0;
-      if (x < -0.5 * hh - OV || x > W + OV + 0.5 * hh) continue;
-      drawWalker(ctx, walkerShape(type, pose), Math.round(x), row.foot + bob, hh, row.dir, row.rim, rimCol, body);
+      const bob = pose === 1 ? -Math.round(row.h * 0.012) : 0;
+      if (x < -0.5 * row.h - OV || x > W + OV + 0.5 * row.h) continue;
+      if (ri === 3) {
+        // huge foreground passers-by: vector (crisp at 1000+ px)
+        const sh = walkerShape(type, pose).path;
+        for (let pass = 0; pass < 2; pass++) {
+          ctx.save();
+          ctx.translate(x + (pass ? 0 : row.rim), row.foot + bob - (pass ? 0 : row.rim * 0.6));
+          ctx.scale(row.h * row.dir, row.h);
+          ctx.fillStyle = pass ? C.black : C.red;
+          ctx.fill(sh);
+          ctx.restore();
+        }
+        continue;
+      }
+      const spr = set[type][pose];
+      if (k0 === 1 && row.dir > 0) {
+        ctx.drawImage(spr.cv, x - spr.ax, row.foot + bob - spr.ay);
+      } else {
+        ctx.save();
+        ctx.translate(x, row.foot + bob);
+        ctx.scale(k0 * row.dir, k0);
+        ctx.drawImage(spr.cv, -spr.ax, -spr.ay);
+        ctx.restore();
+      }
     }
   }
   function drawCrowd(ctx, env, p, K) {
@@ -1906,7 +2011,7 @@
     const night = I < 0.5 ? v % 2 === 0 : v % 2 === 1;
     const tau = p.lt * p.speed + rand(p.seed, 1) * 200;
     const px = Math.round(W * 0.5 + srand(p.seed, 5) * 240);
-    const discY = 470, dr = 330;
+    const discY = 470, dr = MOON_R;
     fillAll(ctx, night ? C.navy : C.red);
     if (night) {
       fillRamp(ctx, 'crowd-night', -OV);
@@ -1914,8 +2019,8 @@
     } else {
       fillRamp(ctx, 'crowd-red', -OV);
     }
-    // concentric jagged shock rings drifting out from the moon (never rays)
-    shockRings(ctx, px, discY, B, p.seed + 7, { color: night ? C.red : C.black, r0: dr + 110, gap: 80, n: 3, kick: 12, amp: 10, tooth: 44, lw: 9, rot: tau * 0.03, alpha: 0.35 + 0.45 * I });
+    // broken halo arcs turning around the moon (rings, never rays)
+    haloArcs(ctx, px, discY, dr + 110, 64, B, tau, night ? C.red : C.black, 0.45 + 0.4 * I, 9);
     // cream halftone moon behind the lone figure, ringed on the bar
     ctx.lineWidth = 12;
     ctx.strokeStyle = night ? C.red : C.black;
@@ -1950,11 +2055,11 @@
     }
     ctx.fill();
     const speedK = 0.6 + 0.8 * I;
-    drawCrowdRow(ctx, 0, tau, p, B, I, q, speedK, night);
-    drawCrowdRow(ctx, 1, tau, p, B, I, q, speedK, night);
-    drawCrowdRow(ctx, 2, tau, p, B, I, q, speedK, night);
-    drawStudent(ctx, px, 996, 660, tau, srand(p.seed, 8) < 0 ? -1 : 1, B, C.red);
-    drawCrowdRow(ctx, 3, tau, p, B, I, q, speedK, night);
+    drawCrowdRow(ctx, K, 0, tau, p, B, I, q, speedK, night);
+    drawCrowdRow(ctx, K, 1, tau, p, B, I, q, speedK, night);
+    drawCrowdRow(ctx, K, 2, tau, p, B, I, q, speedK, night);
+    drawStudent(ctx, K.student, px, 996, 660, tau, srand(p.seed, 8) < 0 ? -1 : 1, B);
+    drawCrowdRow(ctx, K, 3, tau, p, B, I, q, speedK, night);
   }
 
   /* ================================================================== */
@@ -2034,11 +2139,12 @@
       tunnelShape(ctx, kind, cx, cy, rad[k], rot[k]);
       ctx.stroke();
     }
-    // speed lines
+    // speed lines: black + dark red (cream on the night palette) — never
+    // light streaks radiating over red
     const nL = Math.round((26 + 40 * I) * q);
     const sp = 2.2 + 3 * I;
     for (let pass = 0; pass < 2; pass++) {
-      ctx.fillStyle = pass ? (night ? C.star : C.white) : C.black;
+      ctx.fillStyle = pass ? (night ? C.star : C.blood) : C.black;
       ctx.beginPath();
       for (let j = pass; j < nL; j += 2) {
         const u0 = tau * sp + rand(p.seed, j, 1);
@@ -2086,8 +2192,8 @@
   function buildStripes() {
     const K = {};
     K.seqs = [0, 1, 2, 3].map((i) => stripeSeq(i + 1));
-    K.htBL = halftoneSprite(1300, 900, { cell: 20, angle: 25 * DEG, color: C.black, fn: (u, v) => 1.15 * clamp(1 - Math.hypot(u, 1 - v) * 1.05) });
-    K.htTR = halftoneSprite(1100, 800, { cell: 18, angle: 25 * DEG, color: C.white, fn: (u, v) => 1.1 * clamp(1 - Math.hypot(1 - u, v) * 1.1) });
+    K.htBL = radialQuad(C.black);
+    K.htTR = radialQuad(C.white);
     return K;
   }
   function chainPath(ctx, x0, y0, x1, y1, link, lw, phase) {
@@ -2253,8 +2359,8 @@
     ctx.restore();
     // halftone gradients (corners)
     const drift = Math.round(20 * Math.sin(tau * 0.4));
-    ctx.drawImage(K.htBL, -OV + drift, H + OV - K.htBL.height);
-    ctx.drawImage(K.htTR, W + OV - K.htTR.width - drift, -OV);
+    drawQuad(ctx, K.htBL, -OV + 60 + drift, H + OV - 40, 1, -1);
+    drawQuad(ctx, K.htTR, W + OV - 60 - drift, -OV + 40, -1, 1);
     // chain across the frame
     if (v % 2 === 0) {
       ctx.strokeStyle = C.black;
@@ -2491,7 +2597,7 @@
     rampTile('skyred-hz');
     K.cloudsBig = [0, 1, 2].map((i) => makeCloud(880 + i * 60, 330, 900 + i, 9));
     K.cloudsSmall = [0, 1].map((i) => makeCloud(460 + i * 40, 170, 950 + i, 6));
-    K.moon = moonSprite('red', 250);
+    K.moon = moonSprite('red');
     K.roofs = makeSkyline({ seed: 7301, w: 2880, h: 360, top: [150, 280], bw: [60, 200], gap: [-4, 6], tower: 0.05, lit: [0.02, 0.1], types: [0, 2, 3, 3, 5, 1], color: C.black, win: { w: 10, h: 12, gx: 12, gy: 14, m: 12, colors: [[C.white, 2], [C.red, 1]], flicker: 0.02 }, board: C.red });
     return K;
   }
@@ -2509,11 +2615,11 @@
       ctx.strokeStyle = C.black;
       ctx.lineWidth = 10;
       ctx.beginPath();
-      ctx.arc(sx, sy, 292 + 10 * B.barPulse, orb, orb + 3.4);
+      ctx.arc(sx, sy, MOON_R + 22 + 10 * B.barPulse, orb, orb + 3.4);
       ctx.stroke();
       ctx.lineWidth = 4;
       ctx.beginPath();
-      ctx.arc(sx, sy, 318 + 16 * B.barPulse, -orb + 2, -orb + 4.4);
+      ctx.arc(sx, sy, MOON_R + 48 + 16 * B.barPulse, -orb + 2, -orb + 4.4);
       ctx.stroke();
       drawMoon(ctx, K.moon, sx, sy);
     }
@@ -2627,8 +2733,8 @@
   }
   function buildShards() {
     const K = { fr: [1, 2, 3].map(fracture) };
-    K.htRed = halftoneSprite(1600, 1600, { cell: 24, angle: 0, color: C.redDeep, fn: (u, v) => 1.05 * clamp(1 - Math.hypot(u - 0.5, v - 0.5) * 1.9) });
-    K.htBlack = halftoneSprite(1600, 1600, { cell: 24, angle: 0, color: C.black, fn: (u, v) => 1.05 * clamp(1 - Math.hypot(u - 0.5, v - 0.5) * 1.9) });
+    K.htRed = radialQuad(C.redDeep);
+    K.htBlack = radialQuad(C.black);
     K.buf = [];
     return K;
   }
@@ -2640,8 +2746,7 @@
     const ix = W * (0.3 + 0.4 * rand(p.seed, 2)), iy = H * (0.35 + 0.3 * rand(p.seed, 3));
     const shards = K.fr[p.seed % K.fr.length];
     fillAll(ctx, bg);
-    const ht = scheme === 0 ? K.htRed : K.htBlack;
-    ctx.drawImage(ht, Math.round(ix - ht.width / 2), Math.round(iy - ht.height / 2));
+    drawRadialHalftone(ctx, scheme === 0 ? K.htRed : K.htBlack, ix, iy);
     const amt = (b) => (mod(b, 4) === 0 ? 0.05 : 0.4 + 0.6 * rand(p.seed, b, 3)) * (0.35 + 0.65 * I);
     const kSnap = E.outBack(clamp(B.sinceDownbeat / 0.28), 1.4);
     const A = lerp(amt(B.bar - 1), amt(B.bar), kSnap) + 0.1 * B.barPhase * (0.3 + I);
@@ -3188,17 +3293,19 @@
     const ink = (R, seed, col, dot) => sprite(Math.ceil(R * 2.7), Math.ceil(R * 2.7), (c, w, h) => paintInk(c, w / 2, h / 2, R, seed, col, dot));
     K.fog = [ink(270, 6101, C.blood, C.blood), ink(330, 6102, C.blood, C.redDeep), ink(210, 6103, C.redDeep, C.blood)];
     K.fogAt = [[0.2, 0.3], [0.78, 0.68], [0.5, 0.98]];
-    K.blobs = [0, 1].map((i) => sprite(620, 620, (c) => paintInk(c, 310, 310, 150, 6110 + i, i ? C.redDeep : C.blood, C.blood)));
+    K.blobs = [0, 1].map((i) => sprite(400, 400, (c) => paintInk(c, 200, 200, 150, 6110 + i, i ? C.redDeep : C.blood, C.blood)));
     K.scraps = [];
     for (let k = 0; k < 8; k++) K.scraps.push(scrapSprite(k, 6200 + k));
-    K.dots = halftoneSprite(1100, 800, { cell: 14, angle: 20 * DEG, color: C.gray, fn: (u, v) => 0.9 * clamp(1 - Math.hypot(1 - u, 1 - v) * 1.1) });
+    K.dots = radialQuad(C.white); // drawn faint (≈ C.gray on black)
     return K;
   }
   function drawVoid(ctx, env, p, K) {
     const B = beatOf(env), I = p.intensity, q = env.quality || 1;
     const tau = p.lt * p.speed + rand(p.seed, 1) * 300;
     fillAll(ctx, C.black);
-    ctx.drawImage(K.dots, W + OV - K.dots.width, H + OV - K.dots.height);
+    ctx.globalAlpha = 0.1;
+    drawQuad(ctx, K.dots, W + OV, H + OV, -1, -1);
+    ctx.globalAlpha = 1;
     // drifting ink fog (integer blits, no rotation: cheap in software raster too)
     ctx.globalAlpha = 0.62 + 0.18 * I + 0.1 * B.barPulse;
     const fx = -OV - 380 + Math.round(170 * (1 + Math.sin(tau * 0.045 + p.seed)) + 40 * rand(p.seed, 9));
