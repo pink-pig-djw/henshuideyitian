@@ -32,7 +32,15 @@
  *   endcard    same meta source; ends on black
  * `strength` (default 1) scales size / count / opacity where it makes sense.
  *
- * Also exported: MV.FX = { emblem, ransom, meta, dotField } (small shared helpers).
+ * Also exported: MV.FX = { emblem, ransom, meta, toneField, tonePattern, dotField }
+ * (small shared helpers: the original star-slash emblem, ransom-note tiles,
+ * song meta lookup, fast pattern-banded halftone fields, per-dot halftone).
+ *
+ * Performance notes (CPU canvas): rotated pattern fills and rotated image
+ * sampling are the expensive operations — halftones are drawn as unrotated
+ * pattern-filled bands (toneField), textured polygons are filled in logical
+ * space with pre-transformed points, flying glass shards render into a
+ * half-resolution layer.
  */
 (function () {
   'use strict';
@@ -1375,21 +1383,22 @@
       ctx.save();
       ctx.translate(size * 0.12, size * 0.12);
       polyPath(ctx, pts);
-      ctx.fillStyle = kind < 0.6 ? C.black : kind < 0.85 ? C.black : C.red;
+      ctx.fillStyle = kind < 0.6 ? C.red : kind < 0.85 ? C.black : C.red;
       ctx.fill();
       ctx.restore();
       polyPath(ctx, pts);
       if (kind < 0.6) {
-        ctx.fillStyle = 'rgba(255,255,255,0.35)';
+        // glass: white pane, black keyline, red hard shadow, a glint line
+        ctx.fillStyle = C.white;
         ctx.fill();
         ctx.lineWidth = 4;
-        ctx.strokeStyle = C.white;
+        ctx.strokeStyle = C.black;
         ctx.stroke();
-        // glint
         ctx.beginPath();
-        ctx.moveTo(pts[0][0] * 0.5, pts[0][1] * 0.5);
+        ctx.moveTo(pts[0][0] * 0.55, pts[0][1] * 0.55);
         ctx.lineTo(pts[1][0] * 0.35, pts[1][1] * 0.35);
         ctx.lineWidth = 3;
+        ctx.strokeStyle = C.gray;
         ctx.stroke();
       } else if (kind < 0.85) {
         ctx.fillStyle = C.red;
@@ -1716,13 +1725,13 @@
       ctx.textBaseline = 'alphabetic';
       ctx.save();
       ctx.transform(1, 0, -0.18, 1, 0, 0);
-      ctx.font = MV.text.font(50, MV.FONTS.latinCond, 400);
+      ctx.font = MV.text.font(48, MV.FONTS.latinCond, 400);
       ctx.fillStyle = C.white;
-      ctx.fillText(row.label, 24, rowH / 2 + 12);
+      ctx.fillText(row.label, 24, rowH / 2 + 6);
       ctx.restore();
-      ctx.font = MV.text.font(20, MV.FONTS.jpHeavy, 400);
+      ctx.font = MV.text.font(18, MV.FONTS.jpHeavy, 400);
       ctx.fillStyle = C.black;
-      ctx.fillText(row.jp, 22, rowH / 2 + 38);
+      ctx.fillText(row.jp, 18, rowH / 2 + 31);
       // value
       ctx.font = valFont(vs);
       ctx.fillStyle = isCur ? C.black : C.white;

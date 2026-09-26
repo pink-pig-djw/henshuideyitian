@@ -200,9 +200,12 @@
    * Run scene.prepare(stage) once per registered scene (and optional prepare
    * hooks of transitions / effects / lyric styles), then wait for the web
    * fonts covering every lyric / meta string and invalidate the layouts.
+   * @param {object} [opts] { fontTimeout: ms passed to MV.fonts.ensure (default 8000;
+   *   an exporter may pass more so no early frame uses a fallback face) }
    * @returns {Promise<Stage>}
    */
-  Stage.prototype.prepare = async function () {
+  Stage.prototype.prepare = async function (opts) {
+    const fontTimeout = fin(opts && opts.fontTimeout, 8000);
     const yieldNow = () => new Promise((r) => setTimeout(r, 0));
     const regs = [['scene', MV.scenes], ['transition', MV.transitions], ['effect', MV.effects], ['lyric', MV.lyricStyles]];
     for (const [kind, reg] of regs) {
@@ -221,7 +224,7 @@
     try {
       let sample = this.director && this.director.fontText ? this.director.fontText() : '';
       if (MV.LyricFX && MV.LyricFX.fontSample) sample += MV.LyricFX.fontSample;
-      if (MV.fonts && MV.fonts.ensure) await MV.fonts.ensure(sample);
+      if (MV.fonts && MV.fonts.ensure) await MV.fonts.ensure(sample, fontTimeout);
     } catch (e) {
       this._err('fonts', 'ensure', e);
     }
@@ -541,7 +544,7 @@
     const S = this.stats;
     const f2 = (x) => (fin(x, 0)).toFixed(2);
     const rows = [];
-    rows.push(`FPS ${S.fps.toFixed(1)}  frame ${f2(S.renderMs)} ms (avg ${f2(S.avgMs)})  eval ${f2(S.evalMs)} ms  scale ${f2(this.scale)}  ${S.post}`);
+    rows.push(`FPS ${S.fps.toFixed(1)}  frame ${f2(S.renderMs)} ms (avg ${f2(S.avgMs)})  eval ${fin(S.avgEvalMs, 0).toFixed(3)} ms  scale ${f2(this.scale)}  ${S.post}`);
     if (st) {
       const e = st.env, s = e.section;
       rows.push(`t ${MV.fmtTime ? MV.fmtTime(t) : f2(t)}  ${s.name} #${s.index} ${(s.progress * 100).toFixed(0)}%  I ${f2(e.intensity)}  beat ${e.beat.index}.${e.beat.beatInBar}  E ${f2(e.energy)}  on ${f2(e.onsetPulse)}`);

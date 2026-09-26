@@ -92,12 +92,24 @@ function saveDataURL(file, url) {
     const init = await page.evaluate((o) => window.DD.init(o), { debug: false, audio: useAudio ? '../assets/song.mp3' : undefined });
     check('init: full pipeline, no stubs', init.stubs === 0, `features=${init.source} track=${init.trackSource}/${init.lines} post=${init.post} prepare=${init.prepMs.toFixed(0)} ms analysis=${init.analysisMs.toFixed(0)} ms`);
     console.log('      summary', JSON.stringify(init.summary));
+    // Web fonts stream in through the proxy as hundreds of unicode-range
+    // slices; wait for them so frames (and determinism checks) are final.
+    const fontWait = await page.evaluate(async () => {
+      const a = performance.now();
+      await Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, 120000))]);
+      window.DD.stage.invalidateLayouts();
+      let loading = 0;
+      document.fonts.forEach((f) => (loading += f.status === 'loading' ? 1 : 0));
+      return { ms: Math.round(performance.now() - a), loading, status: document.fonts.status };
+    });
+    console.log('      fonts', JSON.stringify(fontWait));
     const fontsOk = await page.evaluate(() => {
       const fams = window.MV.FONTS.webFamilies;
-      const ok = fams.filter(([f, w]) => document.fonts.check(`${w} 64px "${f}"`, '星と僕らAB'));
-      return { ok: ok.length, total: fams.length };
+      const miss = fams.filter(([f, w]) => !document.fonts.check(`${w} 64px "${f}"`, /Anton|Bebas|Archivo|Marker/.test(f) ? 'AB' : '星と'));
+      return { ok: fams.length - miss.length, total: fams.length, missing: miss.map(([f, w]) => f + ' ' + w) };
     });
-    check('web fonts available (Google Fonts via proxy)', fontsOk.ok >= fontsOk.total - 2, `${fontsOk.ok}/${fontsOk.total}`);
+    // informational: font delivery depends on the network, not on this module
+    console.log(`INFO  web fonts available ${fontsOk.ok}/${fontsOk.total}` + (fontsOk.missing.length ? ` (missing: ${fontsOk.missing.join(', ')})` : ''));
 
     /* ---------------- contact sheets over the whole song ---------------- */
     const T = [
@@ -303,26 +315,60 @@ function saveDataURL(file, url) {
     if (!arg('no-perf', false)) {
       const perf = await page.evaluate((N) => {
         const DD = window.DD;
+        // Each frame is followed by a 1-px readback of the composite so the
+        // (otherwise deferred) canvas raster is included in the wall time.
+        // Headless Chrome demotes read-back canvases to CPU raster, so these
+        // are CPU-raster numbers — relative, a GPU laptop is much faster.
+        const comp = DD.stage.comp.ctx;
         const run = (t0, label) => {
-          const ms = [], ev = [];
+          const ms = [], ev = [], wall = [];
+          for (let i = 0; i < 20; i++) (DD.stage.renderFrame(t0 - 0.5 + i / 60), comp.getImageData(0, 0, 1, 1));
           for (let i = 0; i < N; i++) {
+            const a = performance.now();
             const r = DD.stage.renderFrame(t0 + i / 60);
+            comp.getImageData(0, 0, 1, 1);
+            wall.push(performance.now() - a);
             ms.push(r.ms);
             ev.push(r.evalMs);
           }
-          // include GPU/raster flush of the last frame
-          const a = performance.now();
-          DD.stage.canvas.toDataURL('image/jpeg', 0.1);
-          const flush = performance.now() - a;
-          const s = ms.slice().sort((a, b) => a - b), e = ev.slice().sort((a, b) => a - b);
+          const srt = (x) => x.slice().sort((a, b) => a - b);
           const avg = (x) => x.reduce((p, c) => p + c, 0) / x.length;
-          return { label, frames: N, avgMs: +avg(ms).toFixed(2), p50: +s[N >> 1].toFixed(2), p95: +s[Math.floor(N * 0.95)].toFixed(2), evalAvgMs: +avg(ev).toFixed(4), evalP95Ms: +e[Math.floor(N * 0.95)].toFixed(4), flushMs: +flush.toFixed(1) };
+          const w = srt(wall), e = srt(ev);
+          return { label, frames: N, wallAvgMs: +avg(wall).toFixed(2), wallP50: +w[N >> 1].toFixed(2), wallP95: +w[Math.floor(N * 0.95)].toFixed(2), submitAvgMs: +avg(ms).toFixed(2), evalAvgMs: +avg(ev).toFixed(4), evalP95Ms: +e[Math.floor(N * 0.95)].toFixed(4) };
         };
         const out = [run(46.2, 'chorus (transition + accents)'), run(108, 'bridge (quiet)'), run(196, 'climax (showers)'), run(88, 'interlude (credits)')];
-        return { post: DD.stage.stats.post, runs: out };
+        // MV.Post alone (texture upload + shader) on the current composite
+        let a = performance.now();
+        const st = DD.director.evaluate(50);
+        for (let i = 0; i < 20; i++) DD.stage.post.render(DD.stage.comp.canvas, st.post);
+        DD.stage.canvas.toDataURL('image/jpeg', 0.05);
+        const postMs = (performance.now() - a) / 20;
+        // same frames through a Stage without MV.Post (pure Canvas2D path)
+        const c2 = document.createElement('canvas');
+        const s2 = new window.MV.Stage({ canvas: c2, scale: 1, post: false });
+        s2.setDirector(DD.director);
+        const saved = DD.stage;
+        DD.stage = s2;
+        const comp2 = s2.comp.ctx;
+        const runs2d = [46.2, 108, 196, 88].map((t0) => {
+          for (let i = 0; i < 20; i++) (s2.renderFrame(t0 - 0.5 + i / 60), comp2.getImageData(0, 0, 1, 1));
+          const w = [];
+          for (let i = 0; i < N; i++) {
+            const b = performance.now();
+            s2.renderFrame(t0 + i / 60);
+            comp2.getImageData(0, 0, 1, 1);
+            w.push(performance.now() - b);
+          }
+          w.sort((x, y) => x - y);
+          return { t0, avg: +(w.reduce((p, c) => p + c, 0) / N).toFixed(2), p95: +w[Math.floor(N * 0.95)].toFixed(2) };
+        });
+        DD.stage = saved;
+        s2.dispose();
+        return { post: DD.stage.stats.post, runs: out, postOnlyMs: +postMs.toFixed(2), canvas2dOnly: runs2d };
       }, FRAMES);
       fs.writeFileSync(path.join(OUT, 'perf.json'), JSON.stringify(perf, null, 2));
-      for (const r of perf.runs) console.log(`      perf ${r.label.padEnd(30)} renderFrame avg ${r.avgMs} ms p50 ${r.p50} p95 ${r.p95} | evaluate avg ${r.evalAvgMs} ms p95 ${r.evalP95Ms} | flush ${r.flushMs} ms (${perf.post})`);
+      for (const r of perf.runs) console.log(`      perf ${r.label.padEnd(30)} frame (raster incl.) avg ${r.wallAvgMs} ms p50 ${r.wallP50} p95 ${r.wallP95} | renderFrame submit ${r.submitAvgMs} ms | evaluate avg ${r.evalAvgMs} ms p95 ${r.evalP95Ms} (${perf.post})`);
+      console.log(`      perf MV.Post alone ${perf.postOnlyMs} ms/frame; Canvas2D-only Stage (no post): ` + perf.canvas2dOnly.map((r) => `t${r.t0}: avg ${r.avg} p95 ${r.p95}`).join(' | '));
       check('evaluate() inside the page < 0.5 ms (p95)', perf.runs.every((r) => r.evalP95Ms < 0.5), perf.runs.map((r) => r.evalP95Ms).join(' / '));
     }
 
@@ -332,8 +378,18 @@ function saveDataURL(file, url) {
       if (path.resolve(lyrFile).startsWith(path.resolve(ROOT, '..') + path.sep)) throw new Error('MV_LYRICS must live outside the repository');
       const text = fs.readFileSync(lyrFile, 'utf8');
       fs.mkdirSync(path.join(OUT, 'real'), { recursive: true });
-      const r = await page.evaluate((o) => window.DD.init(o), { lyrics: text, audio: useAudio ? '../assets/song.mp3' : undefined });
-      check('real lyrics: 12 displayed lines', r.lines === 12, `lines=${r.lines} source=${r.trackSource}`);
+      // real text needs the full unicode-range sheets → fresh page with ?fonts=full
+      await page.goto(BASE + '/tools/dev-director.html?manual&fonts=full', { waitUntil: 'load' });
+      const r = await page.evaluate(async (o) => {
+        const r = await window.DD.init(o);
+        await Promise.race([document.fonts.ready, new Promise((res) => setTimeout(res, 300000))]);
+        window.DD.stage.invalidateLayouts();
+        let loading = 0;
+        document.fonts.forEach((f) => (loading += f.status === 'loading' ? 1 : 0));
+        r.fontsLoading = loading;
+        return r;
+      }, { lyrics: text, audio: useAudio ? '../assets/song.mp3' : undefined });
+      check('real lyrics: 12 displayed lines', r.lines === 12, `lines=${r.lines} source=${r.trackSource} fontsStillLoading=${r.fontsLoading}`);
       for (let i = 0; i < T.length; i++) {
         const url = await page.evaluate(([ts]) => window.DD.sheet(ts, 3, 640), [T[i]]);
         saveDataURL(path.join(OUT, 'real', `sheet-${i + 1}.png`), url);

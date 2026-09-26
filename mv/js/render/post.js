@@ -292,18 +292,18 @@
     if (neutral) {
       gl.uniform1i(r.copyTex, 0);
     } else {
-    gl.uniform1i(L.uTex, 0);
-    gl.uniform2f(L.uRes, w, h);
-    gl.uniform1f(L.uShift, Math.max(0, num(P.rgbShift)));
-    gl.uniform1f(L.uGlitch, MV.clamp(num(P.glitch)));
-    gl.uniform1f(L.uSeed, MV.mod(Math.floor(num(P.glitchSeed)), 65521));
-    gl.uniform1f(L.uGrain, MV.clamp(num(P.grain)));
-    gl.uniform1f(L.uVig, MV.clamp(num(P.vignette)));
-    gl.uniform1f(L.uFlash, MV.clamp(num(P.flash)));
-    gl.uniform1f(L.uRed, MV.clamp(num(P.redFlash)));
-    gl.uniform1f(L.uInv, MV.clamp(num(P.invert)));
-    gl.uniform1f(L.uScan, MV.clamp(num(P.scanlines)));
-    gl.uniform1f(L.uTime, MV.mod(num(P.time), 3600));
+      gl.uniform1i(L.uTex, 0);
+      gl.uniform2f(L.uRes, w, h);
+      gl.uniform1f(L.uShift, Math.max(0, num(P.rgbShift)));
+      gl.uniform1f(L.uGlitch, MV.clamp(num(P.glitch)));
+      gl.uniform1f(L.uSeed, MV.mod(Math.floor(num(P.glitchSeed)), 65521));
+      gl.uniform1f(L.uGrain, MV.clamp(num(P.grain)));
+      gl.uniform1f(L.uVig, MV.clamp(num(P.vignette)));
+      gl.uniform1f(L.uFlash, MV.clamp(num(P.flash)));
+      gl.uniform1f(L.uRed, MV.clamp(num(P.redFlash)));
+      gl.uniform1f(L.uInv, MV.clamp(num(P.invert)));
+      gl.uniform1f(L.uScan, MV.clamp(num(P.scanlines)));
+      gl.uniform1f(L.uTime, MV.mod(num(P.time), 3600));
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, r.buf);
     gl.enableVertexAttribArray(0);
@@ -345,7 +345,7 @@
     const shift = Math.max(0, num(P.rgbShift)) * k;
     if (shift > 0.5) {
       ctx.globalAlpha = 0.3;
-      ctx.drawImage(src, shift, -shift * 0.21, w, h);
+      ctx.drawImage(src, Math.round(shift), -Math.round(shift * 0.21), w, h); // integer offset → unfiltered blit
       ctx.globalAlpha = 1;
     }
     // glitch: displaced row bands + a few inverted blocks

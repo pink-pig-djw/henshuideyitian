@@ -357,27 +357,29 @@ const EFFECT_OPTS = {
       }
       const tiers = await page.evaluate((b) => ['webgl2', 'webgl1', '2d'].map((t) => devFx.postRender({ tier: t, bg: b, params: {} })), src);
       check('Post tiers: webgl2 / webgl / 2d', tiers[0].mode === 'webgl2' && tiers[1].mode === 'webgl' && tiers[2].mode === '2d' && tiers.every((t) => t.ok), JSON.stringify(tiers));
-      // neutral params ≈ identity (sample pixels)
+      // neutral params ≈ identity: compare Post output with the source frame
       const ident = await page.evaluate((b) => {
+        const read = (c) => {
+          const t = document.createElement('canvas');
+          t.width = 480;
+          t.height = 270;
+          const x = t.getContext('2d', { willReadFrequently: true });
+          x.drawImage(c, 0, 0, 480, 270);
+          return x.getImageData(0, 0, 480, 270).data;
+        };
+        devFx.frame({ type: 'bg', bg: b });
+        const ref = read(document.getElementById('cv'));
         const out = {};
-        for (const tier of ['webgl2', '2d']) {
-          devFx.postRender({ tier, bg: b, params: {} });
-          const c = document.createElement('canvas');
-          c.width = 1920;
-          c.height = 1080;
-          const x = c.getContext('2d', { willReadFrequently: true });
-          x.drawImage(document.querySelector('canvas[data-tier="' + tier + '"]'), 0, 0);
-          const a = x.getImageData(0, 0, 1920, 1080).data;
-          const s = document.createElement('canvas');
-          s.width = 1920;
-          s.height = 1080;
-          const y = s.getContext('2d', { willReadFrequently: true });
-          y.drawImage(devFx.__bg ? devFx.__bg : document.createElement('canvas'), 0, 0);
-          out[tier] = a;
+        for (const tier of ['webgl2', 'webgl1', '2d']) {
+          devFx.postRender({ tier, bg: b, params: { time: 3 } });
+          const d = read(document.querySelector('canvas[data-tier="' + tier + '"]'));
+          let sum = 0;
+          for (let i = 0; i < d.length; i += 4) sum += Math.abs(d[i] - ref[i]) + Math.abs(d[i + 1] - ref[i + 1]) + Math.abs(d[i + 2] - ref[i + 2]);
+          out[tier] = +(sum / (d.length / 4) / 3).toFixed(3);
         }
-        return true;
+        return out;
       }, src);
-      check('Post neutral render runs on webgl2 + 2d', ident === true);
+      check('Post neutral params ≈ identity (mean abs diff < 1.5 / 255)', Object.values(ident).every((v) => v < 1.5), JSON.stringify(ident));
       const detP = await page.evaluate((b) => {
         const get = () => {
           const c = document.createElement('canvas');

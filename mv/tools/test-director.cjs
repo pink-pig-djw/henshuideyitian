@@ -476,6 +476,20 @@ function suite(label, dir, o = {}) {
   }
   suite('preset-only', new MV.Director({ preset, track }), { lyrics: true });
 
+  // ---- registered subsets: unknown scene / transition names are dropped
+  {
+    ['sunburst', 'starfield', 'crowd'].forEach((n) => MV.scenes.register(n, { draw() {} }));
+    ['shatter', 'glitch-cut', 'star-iris'].forEach((n) => MV.transitions.register(n, { duration: 0.6, draw() {} }));
+    const d = new MV.Director({ features, track, preset });
+    const names = new Set(d.cues.scenes.map((c) => c.name));
+    const trs = new Set(d.cues.scenes.filter((c) => c.transition).map((c) => c.transition.name));
+    const durOk = d.cues.scenes.every((c) => !c.transition || Math.abs(c.transition.end - c.transition.start - 0.6) < 1e-6 || c.transition.end - c.transition.start < 0.6);
+    check('only registered scenes / transitions are cued (registry durations used)', [...names].every((n) => MV.scenes.has(n)) && [...trs].every((n) => MV.transitions.has(n)) && durOk, `${[...names].join(',')} | ${[...trs].join(',')}`);
+    // reset registries for the remaining tests
+    MV.scenes = MV.registry('scene');
+    MV.transitions = MV.registry('transition');
+  }
+
   // ---- fallback lookups agree with MV.Analysis
   if (HAS_ANALYSIS) {
     const savedA = MV.Analysis;

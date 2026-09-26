@@ -1,0 +1,594 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dev · Export</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<script>
+  // Google Fonts for the real-director mode (one small subset sheet built
+  // from the placeholder lines + UI glyphs; ?fonts=full for pasted text).
+  window.DEV_FONTS = (function () {
+    const q = new URLSearchParams(location.search);
+    const fams = ['Anton', 'Archivo+Black', 'Bebas+Neue', 'Dela+Gothic+One', 'DotGothic16', 'Kaisei+Decol:wght@700',
+      'Noto+Sans+JP:wght@500;900', 'Noto+Sans+SC:wght@900', 'Noto+Serif+JP:wght@900', 'Permanent+Marker', 'Potta+One',
+      'Rampart+One', 'Reggae+One', 'RocknRoll+One', 'Shippori+Mincho+B1:wght@800', 'Zen+Antique'];
+    return {
+      full: q.get('fonts') === 'full',
+      url(text) {
+        let u = 'https://fonts.googleapis.com/css2?family=' + fams.join('&family=') + '&display=block';
+        if (text != null) u += '&text=' + encodeURIComponent(Array.from(new Set(Array.from(text))).join(''));
+        return u;
+      },
+      add(href) {
+        return new Promise((res) => {
+          let tries = 0;
+          const go = () => {
+            const l = document.createElement('link');
+            l.rel = 'stylesheet';
+            l.href = href + (tries ? '&retry=' + tries : '');
+            l.onload = () => res(true);
+            l.onerror = () => { l.remove(); if (++tries < 3) setTimeout(go, 400 * tries); else res(false); };
+            document.head.appendChild(l);
+          };
+          go();
+        });
+      },
+    };
+  })();
+</script>
+<style>
+  /* Dev-page chrome only. */
+  :root { color-scheme: dark; --red: #E60012; --ink: #0A0A0A; --white: #FFFFFF; --muted: rgba(255,255,255,.62); --line: #2a2a2a; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--ink); color: var(--white); font: 13px/1.45 "Noto Sans SC", "Noto Sans JP", system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 12px 16px; background: #000; border-bottom: 3px solid var(--red); }
+  header h1 { margin: 0; font: 400 28px/1 Anton, Impact, "Arial Narrow", sans-serif; letter-spacing: .04em; transform: skewX(-12deg); text-shadow: 3px 3px 0 var(--red); }
+  header .caps { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { padding: 2px 8px; font: 700 11px/1.6 ui-monospace, Menlo, Consolas, monospace; background: #1a1a1a; border-left: 4px solid #444; transform: skewX(-12deg); }
+  .chip.on { border-left-color: var(--red); background: #2a0006; }
+  main { display: grid; grid-template-columns: minmax(280px, 380px) 1fr; gap: 16px; padding: 16px; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  section { background: #111; border: 1px solid var(--line); padding: 14px; }
+  section h2 { margin: 0 0 10px; font: 400 18px/1 Anton, Impact, sans-serif; letter-spacing: .06em; color: var(--red); transform: skewX(-8deg); }
+  .grid { display: grid; grid-template-columns: auto 1fr; gap: 8px 10px; align-items: center; }
+  label { color: var(--muted); }
+  input, select { width: 100%; background: #0b0b0b; color: #fff; border: 1px solid #333; padding: 5px 6px; font: inherit; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  button { border: 0; padding: 8px 14px; font: 700 13px/1 "Noto Sans SC", system-ui, sans-serif; background: #fff; color: var(--ink); transform: skewX(-12deg); box-shadow: 3px 3px 0 var(--red); cursor: pointer; }
+  button.red { background: var(--red); color: #fff; box-shadow: 3px 3px 0 #fff; }
+  button:disabled { opacity: .4; cursor: default; }
+  .prog { position: relative; height: 26px; margin-top: 14px; background: #000; border: 2px solid #fff; transform: skewX(-12deg); overflow: hidden; }
+  .prog i { position: absolute; inset: 0 auto 0 0; width: 0; background: repeating-linear-gradient(-35deg, var(--red) 0 14px, #c0000f 14px 22px); transition: width .1s linear; }
+  .prog span { position: absolute; inset: 0; display: grid; place-items: center; font: 700 12px/1 ui-monospace, Menlo, monospace; transform: skewX(12deg); text-shadow: 1px 1px 0 #000; white-space: nowrap; overflow: hidden; }
+  @media (max-width: 480px) { .prog span { font-size: 10px; } }
+  .out { color: var(--muted); font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-all; }
+  video, canvas.preview { width: 100%; max-height: 60vh; background: #000; display: block; aspect-ratio: 16/9; object-fit: contain; }
+  a.dl { color: #fff; }
+</style>
+</head>
+<body>
+<header>
+  <h1>DEV · EXPORT</h1>
+  <div class="caps" id="caps"><span class="chip">检测中 probing…</span></div>
+</header>
+<main>
+  <section>
+    <h2>SETTINGS 设置</h2>
+    <div class="grid">
+      <label for="mode">渲染 Render</label>
+      <select id="mode"><option value="stub">测试桩 Stub (frame counter)</option><option value="real">真实 Real director + stage</option></select>
+      <label for="res">分辨率 Size</label>
+      <select id="res"><option>640x360</option><option>1280x720</option><option selected>1920x1080</option><option>1080x1080</option></select>
+      <label for="fps">帧率 FPS</label>
+      <select id="fps"><option>24</option><option selected>30</option><option>60</option></select>
+      <label for="t0">起 From (s)</label><input id="t0" type="number" step="0.1" value="60">
+      <label for="t1">止 To (s)</label><input id="t1" type="number" step="0.1" value="65">
+      <label for="method">方式 Method</label>
+      <select id="method"><option value="auto">自动 auto</option><option value="webcodecs">WebCodecs</option><option value="mediarecorder">MediaRecorder (realtime)</option></select>
+      <label for="vcodec">视频 Video</label>
+      <select id="vcodec"><option>auto</option><option>h264</option><option>vp9</option><option>av1</option></select>
+      <label for="acodec">音频 Audio</label>
+      <select id="acodec"><option>auto</option><option>aac</option><option>opus</option><option>none</option></select>
+    </div>
+    <div class="row">
+      <button id="song" type="button">载入歌曲 Load song</button>
+      <button id="go" type="button" class="red">导出 Export</button>
+      <button id="stop" type="button" disabled>取消 Cancel</button>
+    </div>
+    <div class="prog"><i id="bar"></i><span id="pct">—</span></div>
+    <p class="out" id="status">歌曲 song: 未载入 not loaded (assets/song.mp3)</p>
+  </section>
+  <section>
+    <h2>RESULT 结果</h2>
+    <video id="player" controls muted playsinline></video>
+    <p class="out" id="result">—</p>
+  </section>
+</main>
+
+<script src="../vendor/mp4-muxer.js"></script>
+<script src="../js/core.js"></script>
+<script src="../data/hoshi-to-bokura-to.js"></script>
+<script src="dev-env.js"></script>
+<script src="../js/analysis.js" onerror="console.warn('analysis.js missing')"></script>
+<script src="../js/audio.js" onerror="console.warn('audio.js missing')"></script>
+<script src="../js/lyrics.js" onerror="console.warn('lyrics.js missing')"></script>
+<script src="../js/render/scenes.js" onerror="console.warn('scenes.js missing')"></script>
+<script src="../js/render/lyricfx.js" onerror="console.warn('lyricfx.js missing')"></script>
+<script src="../js/render/fx.js" onerror="console.warn('fx.js missing')"></script>
+<script src="../js/render/post.js" onerror="console.warn('post.js missing')"></script>
+<script src="../js/director.js" onerror="console.warn('director.js missing — stub only')"></script>
+<script src="../js/stage.js" onerror="console.warn('stage.js missing — stub only')"></script>
+<script src="../js/export.js"></script>
+<script>
+(function () {
+  'use strict';
+  const MV = window.MV;
+  const C = MV.C;
+  const $ = (id) => document.getElementById(id);
+  const preset = MV.getPreset('hoshi-to-bokura-to');
+  // Invented placeholder lines (never real lyrics).
+  const PLACEHOLDER = ['夜明けの駅で 君を待つ', '風の音だけ 聞こえた', '遠い灯り 揺れる窓', 'Keep moving on',
+    '星を数えて 歩き出す', 'ほどけた糸を 結び直す', '明日の地図 Take my hand', '光る 空へ 走れ 今',
+    '夜空に 描いた 小さな 願い', '線路の先へ 続く 道', '手を振って 笑おう', 'Keep moving on tonight'].join('\n');
+
+  /* ---------------------------------------------------------------- */
+  /* Stub director + stage: a moving frame counter with a 16-bit       */
+  /* barcode of round(t * fps), so decoded frames can be identified.   */
+  /* ---------------------------------------------------------------- */
+  const BAR = { bits: 16, x0: 160, y0: 60, cell: 100 };
+  // Flat colour swatches (palette tokens) for the colour-fidelity check.
+  const SWATCH = { y0: 190, w: 180, h: 110, gap: 20, x0: 160, keys: ['red', 'white', 'ink', 'navy', 'star', 'redDeep'] };
+  function StubStage(o) {
+    this.canvas = o.canvas;
+    this.fps = o.fps || 30;
+    this.scale = o.scale || 1;
+    this.canvas.width = Math.round(MV.W * this.scale);
+    this.canvas.height = Math.round(MV.H * this.scale);
+    this.ctx = this.canvas.getContext('2d', { alpha: false });
+    this.director = null;
+    this.frames = 0;
+    this.errors = new Map();
+  }
+  StubStage.prototype.setDirector = function (d) { this.director = d; return this; };
+  StubStage.prototype.prepare = async function () { await MV.fonts.ensure('0123456789', 3000); return this; };
+  StubStage.prototype.dispose = function () { this.disposed = true; };
+  StubStage.prototype.renderFrame = function (t) {
+    const ctx = this.ctx, s = this.scale, W = MV.W, H = MV.H;
+    const n = Math.round(t * this.fps);
+    ctx.setTransform(s, 0, 0, s, 0, 0);
+    ctx.fillStyle = C.gray;
+    ctx.fillRect(0, 0, W, H);
+    // diagonal red band that slides with time
+    ctx.save();
+    ctx.translate(W / 2, H * 0.62);
+    ctx.rotate(-12 * Math.PI / 180);
+    ctx.fillStyle = C.red;
+    ctx.fillRect(-W, -110, W * 2, 220);
+    ctx.fillStyle = C.black;
+    for (let i = -14; i < 14; i++) ctx.fillRect(i * 160 + MV.mod(t * 240, 160), -110, 22, 220);
+    ctx.restore();
+    // moving white marker (x ∝ t within each second)
+    ctx.fillStyle = C.white;
+    ctx.fillRect(80 + MV.fract(t) * 1700, 980, 60, 40);
+    // barcode (MSB first): white = 1, black = 0
+    for (let k = 0; k < BAR.bits; k++) {
+      const bit = (n >> (BAR.bits - 1 - k)) & 1;
+      ctx.fillStyle = C.red;
+      ctx.fillRect(BAR.x0 + k * BAR.cell, BAR.y0, BAR.cell, BAR.cell);
+      ctx.fillStyle = bit ? C.white : C.ink;
+      ctx.fillRect(BAR.x0 + k * BAR.cell + 10, BAR.y0 + 10, BAR.cell - 20, BAR.cell - 20);
+    }
+    SWATCH.keys.forEach((k, i) => {
+      ctx.fillStyle = C[k];
+      ctx.fillRect(SWATCH.x0 + i * (SWATCH.w + SWATCH.gap), SWATCH.y0, SWATCH.w, SWATCH.h);
+    });
+    // big frame number + time
+    ctx.fillStyle = C.white;
+    ctx.font = MV.text.font(260, MV.FONTS.latinCond, 400);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(n), W / 2, H * 0.44);
+    ctx.font = MV.text.font(64, MV.FONTS.latinCond, 400);
+    ctx.fillText('t = ' + t.toFixed(3) + ' s', W / 2, H * 0.44 + 190);
+    this.frames++;
+    return { ms: 0 };
+  };
+  const stubDirector = { version: 1, duration: 221.27, hudInfo: { title: 'Dev Stub: 星/Export?', duration: 221.27 }, evaluate: (t) => ({ t }) };
+  function readBarcode(ctx, w, h) {
+    const sx = w / MV.W, sy = h / MV.H;
+    let n = 0;
+    const lum = [];
+    for (let k = 0; k < BAR.bits; k++) {
+      const cx = Math.round((BAR.x0 + k * BAR.cell + BAR.cell / 2) * sx), cy = Math.round((BAR.y0 + BAR.cell / 2) * sy);
+      const r = Math.max(2, Math.round(20 * sx));
+      const d = ctx.getImageData(cx - r, cy - r, 2 * r + 1, 2 * r + 1).data;
+      let L = 0;
+      for (let i = 0; i < d.length; i += 4) L += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      L /= d.length / 4;
+      lum.push(Math.round(L));
+      n = n * 2 + (L > 128 ? 1 : 0);
+    }
+    return { n, minMargin: Math.min(...lum.map((l) => Math.abs(l - 128))) };
+  }
+
+  const hexRGB = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  function readSwatches(ctx, w, h) {
+    const sx = w / MV.W, sy = h / MV.H;
+    let maxErr = 0;
+    const out = {};
+    SWATCH.keys.forEach((k, i) => {
+      const cx = Math.round((SWATCH.x0 + i * (SWATCH.w + SWATCH.gap) + SWATCH.w / 2) * sx), cy = Math.round((SWATCH.y0 + SWATCH.h / 2) * sy);
+      const r = Math.max(2, Math.round(30 * sx));
+      const d = ctx.getImageData(cx - r, cy - r, 2 * r + 1, 2 * r + 1).data;
+      const m = [0, 0, 0];
+      for (let j = 0; j < d.length; j += 4) { m[0] += d[j]; m[1] += d[j + 1]; m[2] += d[j + 2]; }
+      const got = m.map((v) => Math.round(v / (d.length / 4)));
+      const exp = hexRGB(C[k]);
+      const err = Math.max(...got.map((v, j) => Math.abs(v - exp[j])));
+      maxErr = Math.max(maxErr, err);
+      out[k] = { got, exp, err };
+    });
+    return { maxErr, swatches: out };
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* MP4 box inspector                                                 */
+  /* ---------------------------------------------------------------- */
+  const CONTAINERS = new Set(['moov', 'trak', 'mdia', 'minf', 'stbl', 'dinf', 'edts', 'udta', 'mvex', 'moof', 'traf', 'mfra']);
+  function inspectMp4(ab) {
+    const dv = new DataView(ab), u8 = new Uint8Array(ab);
+    const fourcc = (p) => String.fromCharCode(u8[p], u8[p + 1], u8[p + 2], u8[p + 3]);
+    const res = { size: ab.byteLength, top: [], tracks: [], mvhd: null, errors: [] };
+    function leaf(t, b, end, trk) {
+      const v = u8[b];
+      if (t === 'mvhd') {
+        const ts = v ? dv.getUint32(b + 20) : dv.getUint32(b + 12);
+        const du = v ? Number(dv.getBigUint64(b + 24)) : dv.getUint32(b + 16);
+        res.mvhd = { timescale: ts, duration: du, seconds: du / ts };
+      } else if (t === 'tkhd' && trk) {
+        trk.tkhd = { width: dv.getUint32(b + (v ? 88 : 76)) / 65536, height: dv.getUint32(b + (v ? 92 : 80)) / 65536 };
+      } else if (t === 'mdhd' && trk) {
+        const ts = v ? dv.getUint32(b + 20) : dv.getUint32(b + 12);
+        const du = v ? Number(dv.getBigUint64(b + 24)) : dv.getUint32(b + 16);
+        trk.mdhd = { timescale: ts, duration: du, seconds: du / ts };
+      } else if (t === 'hdlr' && trk) {
+        trk.handler = fourcc(b + 8);
+      } else if (t === 'stsd' && trk) {
+        const e = b + 8, fmt = fourcc(e + 4);
+        trk.format = fmt;
+        const kids = [];
+        let p;
+        if (trk.handler === 'vide') {
+          trk.width = dv.getUint16(e + 32); trk.height = dv.getUint16(e + 34); p = e + 86;
+        } else {
+          trk.channels = dv.getUint16(e + 24); trk.sampleRate = dv.getUint32(e + 32) >>> 16; p = e + 36;
+        }
+        const eEnd = e + dv.getUint32(e);
+        while (p + 8 <= eEnd) {
+          const sz = dv.getUint32(p), ct = fourcc(p + 4);
+          kids.push(ct + '(' + sz + ')');
+          if (ct === 'colr' && fourcc(p + 8) === 'nclx') trk.colr = { primaries: dv.getUint16(p + 12), transfer: dv.getUint16(p + 14), matrix: dv.getUint16(p + 16), fullRange: !!(u8[p + 18] & 0x80) };
+          if (ct === 'dOps') trk.preskip = dv.getUint16(p + 10);
+          if (sz < 8) break;
+          p += sz;
+        }
+        trk.config = kids;
+      } else if (t === 'stsz' && trk) {
+        trk.samples = dv.getUint32(b + 8);
+        if (dv.getUint32(b + 4) === 0) {
+          let sum = 0;
+          for (let i = 0; i < trk.samples; i++) sum += dv.getUint32(b + 12 + i * 4);
+          trk.sampleBytes = sum;
+        } else trk.sampleBytes = dv.getUint32(b + 4) * trk.samples;
+      } else if (t === 'stss' && trk) {
+        const n = dv.getUint32(b + 4);
+        trk.keyframes = [];
+        for (let i = 0; i < n; i++) trk.keyframes.push(dv.getUint32(b + 8 + i * 4));
+      } else if (t === 'stts' && trk) {
+        const n = dv.getUint32(b + 4);
+        trk.stts = [];
+        for (let i = 0; i < n; i++) trk.stts.push([dv.getUint32(b + 8 + i * 8), dv.getUint32(b + 12 + i * 8)]);
+      } else if ((t === 'stco' || t === 'co64') && trk) {
+        trk.chunks = dv.getUint32(b + 4);
+        trk.firstChunkOffset = t === 'stco' ? dv.getUint32(b + 8) : Number(dv.getBigUint64(b + 8));
+      }
+    }
+    function walk(start, end, out, trk, depth) {
+      let p = start;
+      while (p + 8 <= end) {
+        let size = dv.getUint32(p), hdr = 8;
+        const t = fourcc(p + 4);
+        if (size === 1) { size = Number(dv.getBigUint64(p + 8)); hdr = 16; } else if (size === 0) size = end - p;
+        if (size < hdr || p + size > end) { res.errors.push(`bad box ${t} @${p} size ${size}`); return; }
+        const node = { type: t, offset: p, size };
+        out.push(node);
+        if (CONTAINERS.has(t)) {
+          let tk = trk;
+          if (t === 'trak') { tk = {}; res.tracks.push(tk); }
+          node.children = [];
+          walk(p + hdr, p + size, node.children, tk, depth + 1);
+        } else if (depth > 0) {
+          try { leaf(t, p + hdr + 0, p + size, trk); } catch (e) { res.errors.push(t + ': ' + e.message); }
+        }
+        p += size;
+      }
+    }
+    walk(0, ab.byteLength, res.top, null, 0);
+    // full-box leaves: version byte is at the body start; offsets above assume that.
+    res.order = res.top.map((b) => b.type);
+    res.fastStart = res.order.indexOf('moov') >= 0 && res.order.indexOf('moov') < res.order.indexOf('mdat');
+    const mdat = res.top.find((b) => b.type === 'mdat');
+    res.mdatBytes = mdat ? mdat.size : 0;
+    // every chunk offset must land inside mdat
+    res.offsetsInMdat = res.tracks.every((t) => !mdat || (t.firstChunkOffset >= mdat.offset && t.firstChunkOffset < mdat.offset + mdat.size));
+    return res;
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Verification helpers                                              */
+  /* ---------------------------------------------------------------- */
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  function once(el, ok, bad, ms) {
+    return new Promise((resolve, reject) => {
+      const t = setTimeout(() => { cleanup(); reject(new Error('timeout waiting for ' + ok)); }, ms || 15000);
+      const onOk = () => { cleanup(); resolve(); };
+      const onBad = () => { cleanup(); reject(new Error((el.error && el.error.message) || bad)); };
+      function cleanup() { clearTimeout(t); el.removeEventListener(ok, onOk); if (bad) el.removeEventListener(bad, onBad); }
+      el.addEventListener(ok, onOk);
+      if (bad) el.addEventListener(bad, onBad);
+    });
+  }
+  function pixelStats(ctx, w, h) {
+    const d = ctx.getImageData(0, 0, w, h).data;
+    let L = 0, nonBlack = 0, red = 0, r = 0, g = 0, b = 0;
+    const n = d.length / 4;
+    for (let i = 0; i < d.length; i += 4) {
+      const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      L += l; r += d[i]; g += d[i + 1]; b += d[i + 2];
+      if (l > 24) nonBlack++;
+      if (d[i] > 150 && d[i + 1] < 70 && d[i + 2] < 80) red++;
+    }
+    return { meanLuma: +(L / n).toFixed(1), nonBlack: +(nonBlack / n).toFixed(3), red: +(red / n).toFixed(3), rgb: [Math.round(r / n), Math.round(g / n), Math.round(b / n)] };
+  }
+
+  /** Load a blob in a <video>, seek to each time, grab pixels (+ barcode). */
+  async function verifyVideo(blob, o = {}) {
+    const url = URL.createObjectURL(blob);
+    const v = document.createElement('video');
+    v.muted = true; v.playsInline = true; v.preload = 'auto';
+    v.src = url;
+    const out = { frames: [] };
+    try {
+      await once(v, 'loadedmetadata', 'error');
+      out.duration = v.duration;
+      out.videoWidth = v.videoWidth; out.videoHeight = v.videoHeight;
+      const c = document.createElement('canvas');
+      c.width = v.videoWidth; c.height = v.videoHeight;
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      for (const t of o.times || [2.5]) {
+        v.currentTime = t;
+        await once(v, 'seeked', 'error');
+        if (v.requestVideoFrameCallback) await Promise.race([new Promise((r) => v.requestVideoFrameCallback(r)), sleep(250)]);
+        ctx.drawImage(v, 0, 0, c.width, c.height);
+        const f = { t, stats: pixelStats(ctx, c.width, c.height) };
+        if (o.barcode) f.barcode = readBarcode(ctx, c.width, c.height);
+        if (o.swatches) f.colour = readSwatches(ctx, c.width, c.height);
+        if (o.png) f.png = c.toDataURL('image/png');
+        out.frames.push(f);
+      }
+      // quick playback check: play 0.4 s, currentTime must advance
+      v.currentTime = 0;
+      await once(v, 'seeked', 'error');
+      const p0 = v.currentTime;
+      await v.play().catch(() => null);
+      await sleep(400);
+      out.playedTo = v.currentTime;
+      out.playAdvanced = v.currentTime > p0 + 0.1;
+      v.pause();
+      if (typeof v.getVideoPlaybackQuality === 'function') {
+        const q = v.getVideoPlaybackQuality();
+        out.decodedFrames = q.totalVideoFrames; out.droppedFrames = q.droppedVideoFrames;
+      }
+    } catch (e) {
+      out.error = e.message;
+    } finally {
+      v.removeAttribute('src'); v.load();
+      URL.revokeObjectURL(url);
+    }
+    return out;
+  }
+
+  /** Decode the blob's audio and compare it with ref[t0 …] (mono NCC over ±80 ms lags). */
+  async function verifyAudio(blob, o) {
+    const ac = new OfflineAudioContext(1, 1, o.ref.sampleRate);
+    let dec;
+    try {
+      dec = await ac.decodeAudioData(await blob.arrayBuffer());
+    } catch (e) {
+      return { error: 'decodeAudioData: ' + e.message };
+    }
+    const sr = dec.sampleRate;
+    const mono = (buf) => {
+      const out = new Float32Array(buf.length);
+      for (let c = 0; c < buf.numberOfChannels; c++) { const d = buf.getChannelData(c); for (let i = 0; i < d.length; i++) out[i] += d[i] / buf.numberOfChannels; }
+      return out;
+    };
+    const a = mono(dec), r = mono(o.ref);
+    let rms = 0;
+    for (let i = 0; i < a.length; i++) rms += a[i] * a[i];
+    rms = Math.sqrt(rms / Math.max(1, a.length));
+    // window 0.5 s starting o.at (default 1.0 s) into the clip
+    const w0 = Math.round((o.at == null ? 1.0 : o.at) * sr), wn = Math.round(0.5 * sr), maxLag = Math.round(0.08 * sr);
+    const base = Math.round(o.t0 * sr);
+    let best = { lag: 0, ncc: -2 };
+    let ea = 0;
+    for (let i = 0; i < wn; i++) ea += a[w0 + i] * a[w0 + i];
+    for (let lag = -maxLag; lag <= maxLag; lag++) {
+      let dot = 0, er = 0;
+      const off = base + w0 + lag;
+      if (off < 0 || off + wn > r.length) continue;
+      for (let i = 0; i < wn; i++) { const rv = r[off + i]; dot += a[w0 + i] * rv; er += rv * rv; }
+      const ncc = dot / Math.sqrt(ea * er + 1e-12);
+      if (ncc > best.ncc) best = { lag, ncc };
+    }
+    return { duration: dec.duration, sampleRate: sr, channels: dec.numberOfChannels, rms: +rms.toFixed(4), ncc: +best.ncc.toFixed(4), lagMs: +((best.lag / sr) * 1000).toFixed(2) };
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Song / director setup                                             */
+  /* ---------------------------------------------------------------- */
+  async function decode(ab, sampleRate) {
+    if (sampleRate) {
+      const oac = new OfflineAudioContext(1, 1, sampleRate);
+      return oac.decodeAudioData(ab.slice(0));
+    }
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    try { return await ac.decodeAudioData(ab.slice(0)); } finally { ac.close && ac.close(); }
+  }
+  function syntheticFeatures(dur) {
+    const f = { duration: dur, sampleRate: 22050, fps: 100, length: 0, rms: new Float32Array(0), low: new Float32Array(0), mid: new Float32Array(0), high: new Float32Array(0), flux: new Float32Array(0),
+      onsets: [], kicks: [], bpm: preset.bpm, beatsPerBar: 4, beats: preset.beats.slice(), downbeats: preset.beats.filter((_, k) => k % 4 === 0),
+      sections: preset.sections.map((s) => Object.assign({}, s)), novelty: new Float32Array(0), source: 'computed', presetId: null, presetOffset: 0, presetConfidence: 0 };
+    if (MV.Analysis && MV.Analysis.applyPreset) MV.Analysis.applyPreset(f, preset, 0, 1);
+    return f;
+  }
+
+  const DX = (window.DX = {
+    MV, inspectMp4, verifyVideo, verifyAudio, StubStage, stubDirector,
+    buffers: {}, director: null, mode: 'stub', last: null, exporter: null,
+    caps: (refresh) => MV.Exporter.capabilities({ refresh: !!refresh }),
+    /** Decode assets/song.mp3 (optionally at a forced sample rate). */
+    async loadSong(url = '../assets/song.mp3', o = {}) {
+      const key = o.key || (o.sampleRate ? 'sr' + o.sampleRate : 'song');
+      if (!DX._songAB) DX._songAB = await (await fetch(url)).arrayBuffer();
+      const t0 = performance.now();
+      const buf = await decode(DX._songAB, o.sampleRate);
+      DX.buffers[key] = buf;
+      if (key === 'song') DX.audioBuffer = buf;
+      $('status').textContent = `歌曲 song: ${buf.duration.toFixed(2)} s · ${buf.sampleRate} Hz · ${buf.numberOfChannels} ch`;
+      return { key, sampleRate: buf.sampleRate, channels: buf.numberOfChannels, duration: buf.duration, decodeMs: Math.round(performance.now() - t0) };
+    },
+    /** Build the director for `mode` ('stub' | 'real'). Real mode analyses the song (or uses preset timing). */
+    async buildDirector(o = {}) {
+      const mode = o.mode || 'stub';
+      DX.mode = mode;
+      if (mode === 'stub') { DX.director = stubDirector; return { mode }; }
+      if (!MV.Director || !MV.Stage) throw new Error('real Director/Stage not loaded');
+      const text = o.lyrics || PLACEHOLDER;
+      if (!DX._fonts) DX._fonts = DEV_FONTS.add(DEV_FONTS.full || o.lyrics ? DEV_FONTS.url() : DEV_FONTS.url(text + (preset.meta.title || '') + (preset.meta.titleLatin || '') + (preset.meta.artist || '') + (preset.meta.lyricist || '') + (preset.meta.composer || '') + '0123456789:.-/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'));
+      const t0 = performance.now();
+      let features;
+      const buf = DX.audioBuffer;
+      if (buf && MV.Analysis && o.analysis !== false) {
+        features = await MV.Analysis.compute(buf, {});
+        const m = MV.Analysis.matchPreset(features, [preset]);
+        if (m) MV.Analysis.applyPreset(features, m.preset, m.offset, m.confidence);
+      } else features = syntheticFeatures(buf ? buf.duration : 221.27);
+      const analysisMs = performance.now() - t0;
+      let track = null;
+      if (MV.Lyrics && MV.Lyrics.parse) {
+        track = MV.Lyrics.parse(text, { preset, features });
+        if (MV.Lyrics.assignStyles) MV.Lyrics.assignStyles(track, features);
+      }
+      DX.director = new MV.Director({ features, track, preset, options: { hud: true, credits: true } });
+      await DX._fonts;
+      return { mode, analysisMs: Math.round(analysisMs), source: features.source, lines: track ? track.lines.length : 0 };
+    },
+    /** Export with the current director. Returns a JSON-able summary; the blob stays in DX.last. */
+    async exportClip(o = {}) {
+      const progress = [];
+      const opts = {
+        director: DX.director,
+        audioBuffer: o.audio === false ? null : DX.buffers[o.audioKey || 'song'] || null,
+        width: o.width || 640, height: o.height || 360, fps: o.fps || 30, range: o.range || [60, 65],
+        method: o.method || 'auto', videoCodec: o.videoCodec || 'auto', audioCodec: o.audioCodec || 'auto', mux: o.mux || 'auto',
+        videoBitrate: o.videoBitrate, title: o.title,
+        onProgress: (p, info) => {
+          progress.push({ p, phase: info.phase, frame: info.frame });
+          $('bar').style.width = (p * 100).toFixed(1) + '%';
+          $('pct').textContent = `${(p * 100).toFixed(1)}% · ${info.phase} · ${info.frame}/${info.frames} · ${info.fpsRendered.toFixed(1)} fps · ETA ${info.etaSeconds == null ? '—' : info.etaSeconds.toFixed(1) + ' s'}`;
+          if (o.onProgress) o.onProgress(p, info);
+        },
+      };
+      if (DX.mode === 'stub' || o.stub) opts.stageFactory = (canvas, so) => new StubStage({ canvas, scale: so.scale, fps: opts.fps });
+      const ex = (DX.exporter = new MV.Exporter(opts));
+      const t0 = performance.now();
+      const res = await ex.run();
+      DX.last = res;
+      const ms = performance.now() - t0;
+      const phases = Array.from(new Set(progress.map((q) => q.phase)));
+      const mono = progress.every((q, i) => i === 0 || q.p >= progress[i - 1].p - 1e-9);
+      showResult(res);
+      const s = Object.assign({}, res, { blob: undefined, ms: Math.round(ms), progressCalls: progress.length, progressPhases: phases, progressMonotonic: mono, lastP: progress.length ? progress[progress.length - 1].p : null });
+      delete s.blob;
+      return s;
+    },
+    async inspectLast() {
+      return inspectMp4(await DX.last.blob.arrayBuffer());
+    },
+    lastBlob: () => DX.last && DX.last.blob,
+  });
+
+  /* ---------------------------------------------------------------- */
+  /* UI                                                                */
+  /* ---------------------------------------------------------------- */
+  function showResult(res) {
+    const url = URL.createObjectURL(res.blob);
+    if (DX._url) URL.revokeObjectURL(DX._url);
+    DX._url = url;
+    $('player').src = url;
+    $('result').innerHTML = '';
+    const a = document.createElement('a');
+    a.className = 'dl'; a.href = url; a.download = res.filename; a.textContent = '⬇ ' + res.filename;
+    $('result').appendChild(a);
+    const pre = document.createElement('div');
+    pre.textContent = `\n${res.method} · ${res.codec} · ${(res.bytes / 1048576).toFixed(2)} MB · ${res.frames} frames in ${res.elapsed.toFixed(1)} s (${res.fpsRendered.toFixed(1)} fps)` +
+      (res.warnings.length ? '\n⚠ ' + res.warnings.join('\n⚠ ') : '') + (res.stageErrors && res.stageErrors.length ? '\nstage: ' + res.stageErrors.join('; ') : '');
+    $('result').appendChild(pre);
+    if (res.container === 'mp4' && res.method === 'webcodecs') {
+      res.blob.arrayBuffer().then((ab) => {
+        const info = inspectMp4(ab);
+        const d = document.createElement('div');
+        d.textContent = '\nboxes: ' + info.order.join(' › ') + ` · fastStart ${info.fastStart} · mvhd ${info.mvhd ? info.mvhd.seconds.toFixed(3) : '?'} s\n` +
+          info.tracks.map((t) => `${t.handler} ${t.format} ${t.width ? t.width + '×' + t.height : t.sampleRate + ' Hz ×' + t.channels} · ${t.samples} samples · ${t.mdhd.seconds.toFixed(3)} s · [${(t.config || []).join(', ')}]`).join('\n');
+        $('result').appendChild(d);
+      });
+    }
+  }
+
+  MV.Exporter.capabilities().then((c) => {
+    const keys = ['webcodecs', 'h264', 'vp9', 'av1', 'aac', 'opus', 'mediaRecorder'];
+    $('caps').innerHTML = '';
+    keys.forEach((k) => {
+      const s = document.createElement('span');
+      s.className = 'chip' + (c[k] ? ' on' : '');
+      s.textContent = k + (c[k] ? ' ✓' : ' ✗');
+      $('caps').appendChild(s);
+    });
+    const s = document.createElement('span');
+    s.className = 'chip on';
+    s.textContent = '→ ' + c.preferred;
+    $('caps').appendChild(s);
+  });
+
+  $('song').onclick = () => DX.loadSong().catch((e) => ($('status').textContent = '载入失败 load failed: ' + e.message));
+  $('go').onclick = async () => {
+    const [w, h] = $('res').value.split('x').map(Number);
+    $('go').disabled = true; $('stop').disabled = false;
+    try {
+      if (!DX.director || DX.mode !== $('mode').value) await DX.buildDirector({ mode: $('mode').value });
+      await DX.exportClip({ width: w, height: h, fps: +$('fps').value, range: [+$('t0').value, +$('t1').value], method: $('method').value, videoCodec: $('vcodec').value, audioCodec: $('acodec').value });
+    } catch (e) {
+      $('result').textContent = (e.name === 'AbortError' ? '已取消 cancelled: ' : '失败 failed: ') + e.message;
+    } finally {
+      $('go').disabled = false; $('stop').disabled = true;
+    }
+  };
+  $('stop').onclick = () => DX.exporter && DX.exporter.cancel();
+  DX.ready = true;
+})();
+</script>
+</body>
+</html>

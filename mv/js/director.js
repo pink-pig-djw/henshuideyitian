@@ -427,10 +427,15 @@
     const S = this.sections;
     const cues = [];
     const minCue = 1.5;
+    // When scenes are registered, drop unknown names (typos in presets /
+    // computed sections) so the Stage never has to fall back.
+    const known = MV.scenes && MV.scenes.list && MV.scenes.list().length ? (n) => MV.scenes.has(n) : () => true;
     for (const sec of S) {
       // Cut points (absolute), first = section start.
       const cuts = [sec.start];
-      const list = sec.scenes;
+      let list = sec.scenes.filter(known);
+      if (!list.length) list = (DEFAULT_SCENES[sec.kind] || DEFAULT_SCENES.verse).filter(known);
+      if (!list.length) list = MV.scenes && MV.scenes.list && MV.scenes.list().length ? MV.scenes.list() : ['void'];
       if (list.length > 1) {
         let cand = [];
         if (sec.switchOn === 'phrase' && this.lyricCues.length) {
@@ -474,20 +479,24 @@
       const sec = S[c.section];
       const secStart = c.k === 0;
       const I = sec.intensity;
-      const quietBoth = I < QUIET;
+      const quiet = I < QUIET;
       const seed = hash(this.seed, 'transition', sec.index, i);
       const u = rnd(seed, 1);
       let items;
       if (secStart) {
-        if (quietBoth) items = SOFT.map((n) => [n, n === 'star-iris' && STAR_SCENES.has(c.name) ? 3 : 1]);
+        if (quiet) items = SOFT.map((n) => [n, n === 'star-iris' && STAR_SCENES.has(c.name) ? 3 : 1]);
         else {
           const loud = I >= 0.6;
           items = STRONG.map((n) => [n, SOFT.indexOf(n) >= 0 ? (loud ? 0.6 : 1) * (n === 'star-iris' && STAR_SCENES.has(c.name) ? 2.5 : 1) : loud ? 3 : 1.5]);
         }
-      } else if (quietBoth) {
+      } else if (quiet) {
         items = u < 0.2 ? null : SOFT.map((n) => [n, n === 'star-iris' && STAR_SCENES.has(c.name) ? 2 : 1]);
       } else {
         items = LIGHT.map((n) => [n, n === 'glitch-cut' && (sec.kind === 'pre' || sec.kind === 'build') ? 2.5 : n === 'red-flash' && I < 0.6 ? 0.5 : 1]);
+      }
+      if (items && MV.transitions && MV.transitions.list && MV.transitions.list().length) {
+        items = items.filter((it) => MV.transitions.has(it[0]));
+        if (!items.length) items = null;
       }
       if (!items) {
         prevT = null;
@@ -595,8 +604,8 @@
           if (latin) {
             latinTimes.push(t);
             // burst from an upper corner so the pop never sits on the text
-            const side = rnd(sd, 1) < 0.5 ? 0.2 : 0.8;
-            add('stars', t, { strength: 0.55 + 0.35 * I, x: W * (side + 0.05 * MV.srand(sd, 2)), y: H * (0.26 + 0.06 * MV.srand(sd, 5)) });
+            const side = rnd(sd, 1) < 0.5 ? 0.1 : 0.9;
+            add('stars', t, { strength: 0.55 + 0.35 * I, x: W * (side + 0.03 * MV.srand(sd, 2)), y: H * (0.17 + 0.04 * MV.srand(sd, 5)) });
             const bright = BRIGHT_SCENES.has(sceneAt(t).name);
             add('ring', t, { strength: 0.6 + 0.5 * I, x: W / 2, y: H * 0.5, data: { color: bright ? 'white' : 'red' } });
             shake(t, 7 * I, 0.3);

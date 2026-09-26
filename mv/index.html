@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0A0A0A">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="浏览器端音乐视频引擎：载入音频、粘贴歌词、播放 / 对轴 / 导出 MP4。Browser-only music-video engine.">
+<title>星と僕らと · MV</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230A0A0A'/%3E%3Cpath d='M32 7L38.5 25.1L57.7 25.7L42.5 37.4L47.9 55.8L32 45L16.1 55.8L21.5 37.4L6.3 25.7L25.5 25.1Z' fill='%23E60012' stroke='%23FFFFFF' stroke-width='3' stroke-linejoin='round'/%3E%3Cpath d='M5 53L55 9L60 14L10 58Z' fill='%23FFFFFF' stroke='%230A0A0A' stroke-width='2.5' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&family=Archivo+Black&family=Bebas+Neue&family=Dela+Gothic+One&family=DotGothic16&family=Kaisei+Decol:wght@700&family=Noto+Sans+JP:wght@500;900&family=Noto+Serif+JP:wght@700;900&family=Noto+Sans+SC:wght@500;900&family=Potta+One&family=Rampart+One&family=Reggae+One&family=RocknRoll+One&family=Shippori+Mincho+B1:wght@800&family=Zen+Antique&family=Permanent+Marker&display=swap">
+<link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/sync.css">
+</head>
+<body class="is-booting">
+
+<!-- Icon sprite (original shapes). -->
+<svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+  <symbol id="emblem" viewBox="0 0 100 100">
+    <path d="M54 15L64 43.2L93.9 44L70.2 62.3L78.7 91L54 74L29.3 91L37.8 62.3L14.1 44L44 43.2Z" fill="#000"/>
+    <path d="M50 11L60 39.2L89.9 40L66.2 58.3L74.7 87L50 70L25.3 87L33.8 58.3L10.1 40L40 39.2Z" fill="#E60012" stroke="#0A0A0A" stroke-width="6" stroke-linejoin="round"/>
+    <path d="M3 84L90 8L97 14L11 93Z" fill="#FFFFFF" stroke="#0A0A0A" stroke-width="4" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M6 3.5L21 12L6 20.5Z" fill="currentColor"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M6 4H10.5L9 20H4.5ZM15 4H19.5L18 20H13.5Z" fill="currentColor"/></symbol>
+  <symbol id="i-audio" viewBox="0 0 24 24"><path d="M9 4.5L20 2.5V16.2A3.2 3.2 0 1 1 17.6 13.1V7.1L11.4 8.3V18.2A3.2 3.2 0 1 1 9 15.1Z" fill="currentColor"/></symbol>
+  <symbol id="i-lyrics" viewBox="0 0 24 24"><path d="M3 4H21L19.5 15H12L6.5 20L7.5 15H2Z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/><path d="M6.5 8.2H17M6 11.4H13.5" stroke="currentColor" stroke-width="2.2"/></symbol>
+  <symbol id="i-sync" viewBox="0 0 24 24"><circle cx="12" cy="13.5" r="7.8" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M12 13.5L15.5 9.5M9.5 2.5H14.5M12 2.5V5.5" stroke="currentColor" stroke-width="2.2" stroke-linecap="square"/></symbol>
+  <symbol id="i-export" viewBox="0 0 24 24"><path d="M12 2.5V14M7 9.5L12 14.5L17 9.5" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M3.5 15.5V20.5H20.5V15.5" fill="none" stroke="currentColor" stroke-width="2.4"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><path d="M3 6H21M3 12H21M3 18H21" stroke="currentColor" stroke-width="2"/><path d="M13 3.2H17.5L16.3 8.8H11.8ZM5.5 9.2H10L8.8 14.8H4.3ZM14 15.2H18.5L17.3 20.8H12.8Z" fill="currentColor"/></symbol>
+  <symbol id="i-full" viewBox="0 0 24 24"><path d="M3 9V3H9M15 3H21V9M21 15V21H15M9 21H3V15" fill="none" stroke="currentColor" stroke-width="2.6"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 4.5H21.5L20.5 7.5H3ZM3 10.5H20.5L19.5 13.5H2ZM2 16.5H19.5L18.5 19.5H1Z" fill="currentColor"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M5 5L19 19M19 5L5 19" stroke="currentColor" stroke-width="3.2" stroke-linecap="square"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 1.5L14.6 8.6L22.2 8.8L16.2 13.5L18.4 20.8L12 16.5L5.6 20.8L7.8 13.5L1.8 8.8L9.4 8.6Z" fill="currentColor"/></symbol>
+</svg>
+
+<div class="app" id="app">
+
+  <!-- 16:9 stage, letterboxed. -->
+  <main class="stage-wrap" id="stageWrap">
+    <canvas id="stage" width="1920" height="1080" aria-label="MV 画面 Video stage"></canvas>
+    <div class="stage-tag" id="attractTag" hidden><span>PREVIEW</span> 预览 · 未载入音频</div>
+  </main>
+
+  <!-- Start / pause menu. -->
+  <nav class="menu" id="menu" aria-label="主菜单 Main menu">
+    <div class="menu-bg" aria-hidden="true"><i class="menu-slab"></i><i class="menu-halftone"></i><i class="menu-stripe"></i></div>
+    <div class="menu-inner">
+      <header class="menu-head">
+        <svg class="menu-emblem" aria-hidden="true"><use href="#emblem"/></svg>
+        <div class="menu-titles">
+          <h1 class="menu-title" id="menuTitle">星と僕らと</h1>
+          <p class="menu-latin" id="menuLatin">HOSHI TO BOKURA TO</p>
+          <p class="menu-credit" id="menuCredit"></p>
+        </div>
+      </header>
+
+      <ol class="menu-list" id="menuList">
+        <li style="--i:0"><button type="button" class="mi" data-act="play"><span class="mi-zh" id="miPlayZh">播放</span><span class="mi-en" id="miPlayEn">PLAY</span><kbd>Space</kbd></button></li>
+        <li style="--i:1"><button type="button" class="mi" data-act="audio"><span class="mi-zh">载入音频</span><span class="mi-en">AUDIO</span><kbd>O</kbd></button></li>
+        <li style="--i:2"><button type="button" class="mi" data-act="lyrics"><span class="mi-zh">歌词</span><span class="mi-en">LYRICS</span><kbd>L</kbd></button></li>
+        <li style="--i:3"><button type="button" class="mi" data-act="sync"><span class="mi-zh">对轴</span><span class="mi-en">SYNC</span><kbd>S</kbd></button></li>
+        <li style="--i:4"><button type="button" class="mi" data-act="export"><span class="mi-zh">导出视频</span><span class="mi-en">EXPORT</span><kbd>E</kbd></button></li>
+        <li style="--i:5"><button type="button" class="mi" data-act="settings"><span class="mi-zh">设置</span><span class="mi-en">SETTINGS</span><kbd>,</kbd></button></li>
+      </ol>
+
+      <aside class="status" id="status" aria-label="状态 Status">
+        <h2 class="status-head"><span class="status-en">STATUS</span><span class="status-zh">状态</span></h2>
+        <dl class="status-list">
+          <div class="st-row" id="stAudioRow" data-state="off"><dt><i></i>音频 <small>AUDIO</small></dt><dd id="stAudio">未载入 · 拖放或点击「载入音频」</dd></div>
+          <div class="st-row" id="stPresetRow" data-state="off"><dt><i></i>预设 <small>PRESET</small></dt><dd id="stPreset">—</dd></div>
+          <div class="st-row" id="stLyricsRow" data-state="off"><dt><i></i>歌词 <small>LYRICS</small></dt><dd id="stLyrics">未粘贴歌词</dd></div>
+        </dl>
+        <p class="status-hint">把音频或 .txt / .lrc 歌词文件拖到页面任意处 · Drop files anywhere</p>
+      </aside>
+
+      <footer class="menu-keys" aria-hidden="true">
+        <span><kbd>Space</kbd>播放</span><span><kbd>←</kbd><kbd>→</kbd>±5 s</span><span><kbd>F</kbd>全屏</span><span><kbd>H</kbd>隐藏界面</span><span><kbd>[</kbd><kbd>]</kbd>歌词偏移</span><span><kbd>D</kbd>调试</span><span><kbd>M</kbd>菜单</span>
+      </footer>
+    </div>
+  </nav>
+
+  <!-- Lyrics panel. -->
+  <section class="panel" id="panelLyrics" role="dialog" aria-modal="false" aria-labelledby="plTitle" hidden>
+    <header class="panel-head"><h2 id="plTitle">歌词 <span>LYRICS</span></h2><button type="button" class="panel-close" data-close aria-label="关闭 Close"><svg><use href="#i-close"/></svg></button></header>
+    <div class="panel-body">
+      <p class="panel-lead">粘贴歌词（纯文本或 LRC）。标题、署名行会被自动忽略；按预设自动对时。<br><span class="en">Paste plain text or LRC — timing comes from the song preset.</span></p>
+      <textarea id="lyricsText" spellcheck="false" autocomplete="off" rows="12" placeholder="在此粘贴歌词…&#10;例：夜明けの駅で 君を待つ&#10;Paste lyrics here"></textarea>
+      <div class="panel-actions">
+        <button type="button" class="btn btn-red" id="btnLyricsApply">应用 <span>APPLY</span></button>
+        <button type="button" class="btn" id="btnLyricsFile">从文件 <span>FILE</span></button>
+        <button type="button" class="btn btn-ghost" id="btnLyricsClear">清空 <span>CLEAR</span></button>
+      </div>
+      <p class="lyrics-result" id="lyricsResult" aria-live="polite"></p>
+      <ul class="lyrics-warn" id="lyricsWarn"></ul>
+      <p class="privacy"><svg aria-hidden="true"><use href="#i-star"/></svg>歌词只保存在本浏览器（localStorage），不会写入仓库，也不会上传。<span class="en">Lyrics stay in this browser only.</span></p>
+    </div>
+  </section>
+
+  <!-- Settings panel. -->
+  <section class="panel" id="panelSettings" role="dialog" aria-modal="false" aria-labelledby="psTitle" hidden>
+    <header class="panel-head"><h2 id="psTitle">设置 <span>SETTINGS</span></h2><button type="button" class="panel-close" data-close aria-label="关闭 Close"><svg><use href="#i-close"/></svg></button></header>
+    <div class="panel-body settings">
+      <div class="set-row">
+        <span class="set-label">信息条 <small>HUD</small></span>
+        <label class="switch"><input type="checkbox" id="setHud" checked><i></i></label>
+      </div>
+      <div class="set-row">
+        <span class="set-label">制作人员字幕 <small>CREDITS</small></span>
+        <label class="switch"><input type="checkbox" id="setCredits" checked><i></i></label>
+      </div>
+      <div class="set-row">
+        <span class="set-label">预览画质 <small>PREVIEW QUALITY</small></span>
+        <div class="seg" id="setQuality" role="radiogroup" aria-label="预览画质">
+          <button type="button" data-v="auto" role="radio">自动 AUTO</button><button type="button" data-v="1" role="radio">1.0</button><button type="button" data-v="0.75" role="radio">0.75</button><button type="button" data-v="0.5" role="radio">0.5</button>
+        </div>
+      </div>
+      <div class="set-row set-offset">
+        <span class="set-label">歌词偏移 <small>LYRIC OFFSET</small></span>
+        <div class="offset-ctl">
+          <button type="button" class="btn btn-mini" id="offMinus" aria-label="-0.05 s">−</button>
+          <input type="range" id="setOffset" min="-2" max="2" step="0.05" value="0" aria-label="歌词偏移（秒）">
+          <button type="button" class="btn btn-mini" id="offPlus" aria-label="+0.05 s">+</button>
+          <output id="offsetOut">+0.00 s</output>
+          <button type="button" class="btn btn-mini btn-ghost" id="offReset">归零</button>
+        </div>
+        <p class="set-note">正值 = 歌词更晚出现。快捷键 <kbd>[</kbd> <kbd>]</kbd>。</p>
+      </div>
+      <div class="set-row">
+        <span class="set-label">音量 <small>VOLUME</small></span>
+        <input type="range" id="setVolume" min="0" max="1" step="0.01" value="1" aria-label="音量">
+      </div>
+      <div class="set-row">
+        <span class="set-label">调试信息 <small>DEBUG</small></span>
+        <label class="switch"><input type="checkbox" id="setDebug"><i></i></label>
+      </div>
+      <div class="set-row">
+        <span class="set-label">本地缓存 <small>CACHE</small></span>
+        <button type="button" class="btn btn-ghost" id="btnClearCache">清除缓存的音频与歌词</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Export panel. -->
+  <section class="panel panel-export" id="panelExport" role="dialog" aria-modal="false" aria-labelledby="peTitle" hidden>
+    <header class="panel-head"><h2 id="peTitle">导出视频 <span>EXPORT</span></h2><button type="button" class="panel-close" data-close aria-label="关闭 Close"><svg><use href="#i-close"/></svg></button></header>
+    <div class="panel-body">
+      <div class="set-row">
+        <span class="set-label">分辨率 <small>RESOLUTION</small></span>
+        <div class="seg" id="exRes" role="radiogroup" aria-label="分辨率"><button type="button" data-v="1080" role="radio">1080p</button><button type="button" data-v="720" role="radio">720p</button></div>
+      </div>
+      <div class="set-row">
+        <span class="set-label">帧率 <small>FPS</small></span>
+        <div class="seg" id="exFps" role="radiogroup" aria-label="帧率"><button type="button" data-v="30" role="radio">30</button><button type="button" data-v="60" role="radio">60</button></div>
+      </div>
+      <div class="set-row">
+        <span class="set-label">范围 <small>RANGE</small></span>
+        <div class="seg" id="exRange" role="radiogroup" aria-label="范围"><button type="button" data-v="all" role="radio">整首 ALL</button><button type="button" data-v="section" role="radio">当前段落 SECTION</button><button type="button" data-v="custom" role="radio">自定义 CUSTOM</button></div>
+      </div>
+      <div class="set-row ex-custom" id="exCustom" hidden>
+        <span class="set-label">起止 <small>FROM – TO</small></span>
+        <div class="ex-range-inputs">
+          <input type="text" id="exFrom" inputmode="decimal" value="0:00" aria-label="开始时间">
+          <span>→</span>
+          <input type="text" id="exTo" inputmode="decimal" value="0:10" aria-label="结束时间">
+        </div>
+      </div>
+      <p class="ex-summary" id="exSummary"></p>
+      <div class="caps" id="exCaps"><span class="cap is-wait">检测编码能力… PROBING</span></div>
+      <div class="panel-actions">
+        <button type="button" class="btn btn-red" id="btnExportStart">开始导出 <span>START</span></button>
+        <button type="button" class="btn btn-ghost" id="btnExportCancel" disabled>取消 <span>CANCEL</span></button>
+      </div>
+      <div class="ex-progress" id="exProgress" hidden>
+        <div class="ex-bar"><i id="exBarFill"></i></div>
+        <p class="ex-info"><b id="exPct">0%</b><span id="exInfo">准备中…</span></p>
+      </div>
+      <div class="ex-result" id="exResult" hidden></div>
+    </div>
+  </section>
+
+  <!-- Player bar. -->
+  <div class="bar" id="bar" hidden>
+    <button type="button" class="b-play" id="btnPlay" aria-label="播放 Play"><svg><use href="#i-play" id="btnPlayIcon"/></svg></button>
+    <div class="b-time" aria-live="off"><span id="tCur">0:00</span><i>/</i><span id="tDur">0:00</span></div>
+    <div class="seek" id="seek" role="slider" tabindex="0" aria-label="进度 Seek" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="0:00">
+      <canvas id="seekCanvas" width="600" height="40"></canvas>
+      <div class="seek-tip" id="seekTip" hidden></div>
+    </div>
+    <div class="b-sec" id="bSection">—</div>
+    <div class="b-btns">
+      <button type="button" class="b-ico" data-act="lyrics" title="歌词 Lyrics (L)" aria-label="歌词 Lyrics"><svg><use href="#i-lyrics"/></svg></button>
+      <button type="button" class="b-ico" data-act="sync" title="对轴 Sync (S)" aria-label="对轴 Sync"><svg><use href="#i-sync"/></svg></button>
+      <button type="button" class="b-ico" data-act="settings" title="设置 Settings" aria-label="设置 Settings"><svg><use href="#i-settings"/></svg></button>
+      <button type="button" class="b-ico" data-act="fullscreen" title="全屏 Fullscreen (F)" aria-label="全屏 Fullscreen"><svg><use href="#i-full"/></svg></button>
+      <button type="button" class="b-ico b-menu" data-act="menu" title="菜单 Menu (M)" aria-label="菜单 Menu"><svg><use href="#i-menu"/></svg></button>
+    </div>
+  </div>
+
+  <!-- Small notices. -->
+  <div class="banner" id="lyricsBanner" hidden>
+    <span class="banner-tag">NO LYRICS</span>
+    <span class="banner-text">还没有歌词 · 粘贴后即可显示字幕</span>
+    <button type="button" class="btn btn-mini btn-red" data-act="lyrics">粘贴歌词 <kbd>L</kbd></button>
+    <button type="button" class="banner-x" id="bannerClose" aria-label="关闭 Dismiss"><svg><use href="#i-close"/></svg></button>
+  </div>
+  <button type="button" class="bigplay" id="bigPlay" hidden><svg aria-hidden="true"><use href="#i-play"/></svg><span>点击播放 <b>CLICK TO PLAY</b></span></button>
+
+  <div class="busy" id="busy" hidden aria-live="polite">
+    <div class="busy-card">
+      <p class="busy-title" id="busyTitle">分析音频 <span>ANALYZING</span></p>
+      <div class="busy-bar"><i id="busyFill"></i></div>
+      <p class="busy-pct" id="busyPct">0%</p>
+    </div>
+  </div>
+
+  <div class="drop" id="drop" hidden aria-hidden="true">
+    <div class="drop-card"><svg><use href="#emblem"/></svg><p>放下文件 <b>DROP</b></p><small>音频 mp3 / m4a / wav / ogg · 歌词 .txt / .lrc</small></div>
+  </div>
+
+  <div class="osd" id="osd" aria-live="polite"></div>
+  <div class="toasts" id="toasts" aria-live="assertive"></div>
+  <pre class="debug-box" id="debugBox" hidden></pre>
+
+  <input type="file" id="fileAudio" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.oga,.opus,.flac,.webm" hidden>
+  <input type="file" id="fileLyrics" accept=".txt,.lrc,text/plain" hidden>
+</div>
+
+<noscript><p class="noscript">需要启用 JavaScript · JavaScript is required.</p></noscript>
+
+<script src="vendor/mp4-muxer.js"></script>
+<script src="js/core.js"></script>
+<script src="data/hoshi-to-bokura-to.js"></script>
+<script src="js/analysis.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/lyrics.js"></script>
+<script src="js/render/scenes.js"></script>
+<script src="js/render/lyricfx.js"></script>
+<script src="js/render/fx.js"></script>
+<script src="js/render/post.js"></script>
+<script src="js/director.js"></script>
+<script src="js/stage.js"></script>
+<script src="js/export.js"></script>
+<script src="js/sync.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
