@@ -1,0 +1,4 @@
+# Your own audio / lyrics stay local — they are loaded at runtime, never committed.
+assets/*
+!assets/README.md
+out/
