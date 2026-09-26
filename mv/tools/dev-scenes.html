@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dev · Scenes</title>
+<style>
+  /* Dev-page chrome only. The scenes draw into the 1920×1080 canvas. */
+  :root { color-scheme: dark; --red: #E60012; --ink: #0A0A0A; --white: #FFFFFF; --muted: rgba(255,255,255,.6); }
+  html, body { margin: 0; height: 100%; background: var(--ink); color: var(--white); font: 13px/1.4 "Noto Sans SC", "Noto Sans JP", system-ui, sans-serif; }
+  body { overflow: hidden; }
+  .wrap { position: absolute; inset: 0; display: flex; flex-direction: column; }
+  .bar { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; padding: 10px 16px; background: #000; border-bottom: 3px solid var(--red); }
+  .bar h1 { margin: 0 8px 0 0; font: 400 24px/1 Anton, Impact, "Arial Narrow", sans-serif; letter-spacing: .04em; transform: skewX(-12deg); text-shadow: 3px 3px 0 var(--red); }
+  .bar label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
+  .bar select, .bar input[type=number] { background: #111; color: #fff; border: 1px solid #333; padding: 4px 6px; font: inherit; }
+  .bar input[type=range] { width: 140px; accent-color: var(--red); }
+  .bar button { border: 0; padding: 7px 12px; font: 700 13px/1 inherit; font-family: inherit; background: #fff; color: var(--ink); transform: skewX(-12deg); box-shadow: 3px 3px 0 var(--red); cursor: pointer; }
+  .bar button.red { background: var(--red); color: #fff; box-shadow: 3px 3px 0 #fff; }
+  .bar .out { color: var(--muted); min-width: 160px; font-variant-numeric: tabular-nums; }
+  .stage { flex: 1; display: grid; place-items: center; min-height: 0; padding: 12px; }
+  canvas { max-width: 100%; max-height: 100%; aspect-ratio: 16 / 9; background: #000; display: block; }
+  body.noui .bar { display: none; }
+  body.noui .stage { padding: 0; }
+  @media (max-width: 700px) { .bar input[type=range] { width: 100px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <h1>DEV · SCENES</h1>
+    <label>场景 Scene <select id="scene"></select></label>
+    <label>时间 t <input id="t" type="range" min="0" max="221" step="0.01"><span id="tv" class="out" style="min-width:52px"></span></label>
+    <label>强度 Intensity <input id="i" type="range" min="0" max="1" step="0.01"></label>
+    <label>变体 Variant <input id="v" type="number" min="0" max="9" step="1" style="width:48px"></label>
+    <label>种子 Seed <input id="seed" type="number" min="1" step="1" style="width:72px"></label>
+    <button id="play" type="button">▶ / ❚❚</button>
+    <button id="perf" type="button" class="red">性能 PERF</button>
+    <span id="info" class="out"></span>
+  </div>
+  <div class="stage"><canvas id="cv" width="1920" height="1080"></canvas></div>
+</div>
+
+<script src="../js/core.js"></script>
+<script src="../data/hoshi-to-bokura-to.js"></script>
+<script src="dev-env.js"></script>
+<script src="../js/analysis.js"></script>
+<script src="../js/render/scenes.js"></script>
+<script>
+/*
+ * Scene dev page. URL params:
+ *   scene=night-city  t=20  i=<intensity, default: preset section at t>  v=0  seed=7
+ *   lt=<seconds since cue start, default t − section start>  dur=<cue length, default 9.66>
+ *   speed=1  q=1 (quality)  play=1  ui=0 (hide the bar)
+ * Test API: window.devScenes = { ready, names, render(o), sheet(o), perf(o), hash(o), alphaCheck(o), realEnvSetup(url?) }.
+ * After `await realEnvSetup()` an option `real: true` builds env from MV.Analysis
+ * features of the local song (assets/song.mp3) instead of the synthetic MV.devEnv.
+ * Dev tooling only: performance.now() is used for timing here, never inside scenes.
+ */
+(function () {
+  'use strict';
+  const MV = window.MV;
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const qs = new URLSearchParams(location.search);
+  const preset = MV.getPreset('hoshi-to-bokura-to');
+  const names = MV.scenes.list();
+  const prepMs = {};
+
+  function prepare(name) {
+    const sc = MV.scenes.get(name);
+    if (!sc) throw new Error('unknown scene ' + name);
+    if (!sc.cache && sc.prepare) {
+      const t0 = performance.now();
+      sc.prepare({ W: MV.W, H: MV.H });
+      prepMs[name] = performance.now() - t0;
+    }
+    return sc;
+  }
+  function sectionAt(t) {
+    const secs = (preset && preset.sections) || [];
+    return secs.find((s) => t >= s.start && t < s.end) || secs[secs.length - 1] || null;
+  }
+  // Optional "real" env: features computed by MV.Analysis from the user's own
+  // local song file (assets/song.mp3, git-ignored), aligned to the preset.
+  let feats = null;
+  async function realEnvSetup(url) {
+    if (!MV.Analysis) throw new Error('js/analysis.js not loaded');
+    const ab = await (await fetch(url || '../assets/song.mp3')).arrayBuffer();
+    const buf = await new OfflineAudioContext(1, 1, 44100).decodeAudioData(ab);
+    let f = await MV.Analysis.compute(buf, {});
+    const m = MV.Analysis.matchPreset(f, MV.presets);
+    if (m) f = MV.Analysis.applyPreset(f, m.preset, m.offset);
+    feats = f;
+    return { duration: f.duration, bpm: f.bpm, beats: f.beats.length, sections: f.sections.length, source: f.source, offset: m ? m.offset : null, confidence: m ? m.confidence : null };
+  }
+  function realEnv(t, o) {
+    const A = MV.Analysis, f = feats;
+    const sa = A.sectionAt(f, t);
+    const s = sa ? sa.section : null;
+    const I = o.i != null ? +o.i : s ? s.intensity : 0.5;
+    return {
+      t, dt: 1 / 60, duration: f.duration,
+      energy: A.sample(f, 'rms', t), low: A.sample(f, 'low', t), mid: A.sample(f, 'mid', t), high: A.sample(f, 'high', t), flux: A.sample(f, 'flux', t),
+      onsetPulse: 0, beat: A.beatInfo(f, t),
+      section: s ? { kind: s.kind, name: s.name, start: s.start, end: s.end, index: sa.index, progress: (t - s.start) / Math.max(1e-3, s.end - s.start), intensity: s.intensity } : null,
+      intensity: I, quality: o.q != null ? +o.q : 1, seed: 1234,
+    };
+  }
+  // Normalise options → { name, env, p, cam }.
+  function resolve(o) {
+    o = o || {};
+    const t = +o.t || 0;
+    if (o.real && feats) {
+      const env = realEnv(t, o);
+      const p = { seed: o.seed != null ? +o.seed : 7, lt: o.lt != null ? +o.lt : 0, dur: o.dur != null ? +o.dur : 9.66, variant: o.v != null ? +o.v : 0, speed: o.speed != null ? +o.speed : 1, intensity: env.intensity };
+      return { name: o.scene || 'night-city', env, p, cam: o.cam || null };
+    }
+    const sec = sectionAt(t);
+    const intensity = o.i != null ? +o.i : sec ? sec.intensity : 0.7;
+    const kind = o.kind || (sec ? sec.kind : 'chorus');
+    const env = MV.devEnv(t, { intensity, kind, seed: +o.seed || 1234, quality: o.q != null ? +o.q : 1, sectionStart: sec ? sec.start : 0, sectionEnd: sec ? sec.end : 221.27 });
+    const lt = o.lt != null ? +o.lt : Math.max(0, t - (sec ? sec.start : 0));
+    const p = { seed: o.seed != null ? +o.seed : 7, lt, dur: o.dur != null ? +o.dur : 9.66, variant: o.v != null ? +o.v : 0, speed: o.speed != null ? +o.speed : 1, intensity };
+    return { name: o.scene || 'night-city', env, p, cam: o.cam || null };
+  }
+  function drawInto(c2, r) {
+    const sc = prepare(r.name);
+    const k = c2.canvas.width / MV.W;
+    c2.setTransform(1, 0, 0, 1, 0, 0);
+    c2.clearRect(0, 0, c2.canvas.width, c2.canvas.height);
+    c2.setTransform(k, 0, 0, k, 0, 0);
+    if (r.cam) {
+      const cam = r.cam;
+      c2.translate(MV.W / 2 + (cam.x || 0), MV.H / 2 + (cam.y || 0));
+      c2.rotate(cam.rot || 0);
+      c2.scale(cam.zoom || 1, cam.zoom || 1);
+      c2.translate(-MV.W / 2, -MV.H / 2);
+    }
+    sc.draw(c2, r.env, r.p);
+    c2.setTransform(1, 0, 0, 1, 0, 0);
+  }
+  function render(o) {
+    const r = resolve(o);
+    const t0 = performance.now();
+    drawInto(ctx, r);
+    ctx.getImageData(0, 0, 1, 1); // flush the raster so the timing is honest
+    return { ms: performance.now() - t0, prepMs: prepMs[r.name] || 0 };
+  }
+  // Contact sheet: cells rendered at full size off-screen, then scaled into a grid.
+  const off = MV.makeCanvas(MV.W, MV.H);
+  function sheet(o) {
+    const cols = o.cols || 3, rows = o.rows || 2;
+    const cw = MV.W / cols, ch = MV.H / rows;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, MV.W, MV.H);
+    (o.cells || []).forEach((cell, n) => {
+      const r = resolve(cell);
+      drawInto(off.ctx, r);
+      const x = (n % cols) * cw, y = Math.floor(n / cols) * ch;
+      ctx.drawImage(off.canvas, x + 2, y + 2, cw - 4, ch - 4);
+      const label = cell.label || `${r.name}  t=${(+cell.t).toFixed(1)}  I=${r.p.intensity.toFixed(2)}  v=${r.p.variant}`;
+      ctx.font = '700 22px system-ui, sans-serif';
+      const w = ctx.measureText(label).width + 16;
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.fillRect(x + 2, y + ch - 36, w, 34);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(label, x + 10, y + ch - 12);
+    });
+  }
+  function perf(o) {
+    const n = o.frames || 120;
+    const times = [];
+    const base = resolve(o);
+    prepare(base.name);
+    for (let f = 0; f < n; f++) {
+      const t = (+o.t || 0) + f / 60;
+      const r = resolve(Object.assign({}, o, { t, lt: o.lt != null ? +o.lt + f / 60 : undefined }));
+      const t0 = performance.now();
+      drawInto(ctx, r);
+      ctx.getImageData(0, 0, 1, 1);
+      times.push(performance.now() - t0);
+    }
+    const s = times.slice().sort((a, b) => a - b);
+    const avg = times.reduce((a, b) => a + b, 0) / n;
+    return { avg, p50: s[Math.floor(n * 0.5)], p95: s[Math.floor(n * 0.95)], max: s[n - 1], prepMs: prepMs[base.name] || 0 };
+  }
+  // Pixel hash of a render (for the determinism test). Uses its own CPU-backed
+  // canvas: reading back the main canvas can flip Chrome between GPU and CPU
+  // raster mid-test, which changes anti-aliasing and would fake a mismatch.
+  let hashCanvas = null;
+  function hash(o) {
+    if (!hashCanvas) {
+      const c = document.createElement('canvas');
+      c.width = MV.W;
+      c.height = MV.H;
+      hashCanvas = c.getContext('2d', { willReadFrequently: true });
+    }
+    drawInto(hashCanvas, resolve(o));
+    const d = hashCanvas.getImageData(0, 0, MV.W, MV.H).data;
+    let h = 0x811c9dc5;
+    for (let i = 0; i < d.length; i += 4 * 7) {
+      h ^= d[i] | (d[i + 1] << 8) | (d[i + 2] << 16);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h.toString(16);
+  }
+  // Count non-opaque pixels (on a transparent canvas, optional camera transform).
+  function alphaCheck(o) {
+    const cc = document.createElement('canvas');
+    cc.width = 480;
+    cc.height = 270;
+    const c2 = cc.getContext('2d', { willReadFrequently: true });
+    drawInto(c2, resolve(o));
+    const d = c2.getImageData(0, 0, 480, 270).data;
+    let bad = 0;
+    for (let i = 3; i < d.length; i += 4) if (d[i] < 255) bad++;
+    return bad;
+  }
+
+  /* ---------------- UI ---------------- */
+  const $ = (id) => document.getElementById(id);
+  const state = {
+    scene: qs.get('scene') || 'night-city', t: +(qs.get('t') || 20), i: qs.get('i'), v: +(qs.get('v') || 0), seed: +(qs.get('seed') || 7),
+    lt: qs.get('lt'), dur: qs.get('dur'), speed: qs.get('speed'), q: qs.get('q'), kind: qs.get('kind'), playing: qs.get('play') === '1',
+  };
+  if (qs.get('ui') === '0') document.body.classList.add('noui');
+  names.forEach((n) => {
+    const op = document.createElement('option');
+    op.value = op.textContent = n;
+    $('scene').appendChild(op);
+  });
+  function opts() {
+    return { scene: state.scene, t: state.t, i: state.i, v: state.v, seed: state.seed, lt: state.lt, dur: state.dur, speed: state.speed, q: state.q, kind: state.kind };
+  }
+  function sync() {
+    $('scene').value = state.scene;
+    $('t').value = state.t;
+    $('tv').textContent = MV.fmtTime(state.t);
+    $('i').value = state.i != null ? state.i : (sectionAt(state.t) || { intensity: 0.7 }).intensity;
+    $('v').value = state.v;
+    $('seed').value = state.seed;
+  }
+  function frame() {
+    const r = render(opts());
+    const sec = sectionAt(state.t);
+    $('info').textContent = `${r.ms.toFixed(1)} ms · ${sec ? sec.name : ''}`;
+  }
+  $('scene').onchange = (e) => { state.scene = e.target.value; frame(); };
+  $('t').oninput = (e) => { state.t = +e.target.value; state.lt = null; sync(); frame(); };
+  $('i').oninput = (e) => { state.i = +e.target.value; frame(); };
+  $('v').oninput = (e) => { state.v = +e.target.value | 0; frame(); };
+  $('seed').oninput = (e) => { state.seed = +e.target.value | 0; frame(); };
+  $('perf').onclick = () => {
+    const r = perf(Object.assign(opts(), { frames: 120 }));
+    $('info').textContent = `avg ${r.avg.toFixed(2)} ms · p95 ${r.p95.toFixed(2)} · prep ${r.prepMs.toFixed(0)} ms`;
+  };
+  let last = 0;
+  function loop(now) {
+    if (!state.playing) return;
+    const dt = last ? Math.min(0.1, (now - last) / 1000) : 0;
+    last = now;
+    state.t += dt;
+    if (state.lt != null) state.lt = +state.lt + dt;
+    if (state.t > 221.27) state.t = 0;
+    sync();
+    frame();
+    requestAnimationFrame(loop);
+  }
+  $('play').onclick = () => {
+    state.playing = !state.playing;
+    last = 0;
+    if (state.playing) requestAnimationFrame(loop);
+  };
+  sync();
+  frame();
+  if (state.playing) requestAnimationFrame(loop);
+
+  window.devScenes = { ready: true, names, render, sheet, perf, hash, alphaCheck, resolve, realEnvSetup };
+})();
+</script>
+</body>
+</html>

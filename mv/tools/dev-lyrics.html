@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dev · Lyric styles</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<script>
+  // Invented placeholder lines (never lyrics of a real song).
+  window.LYRIC_FIXTURES = {
+    jp2: { phrases: ['夜明けの駅で', '君を待つ'], gap: 1.8, kind: 'verse' },
+    jp3: { phrases: ['錆びた線路の', '向こう側まで', '走り出せ'], gap: 1.6, kind: 'chorus' },
+    tail: { phrases: ['光を集めて', '胸に灯せ', 'Keep moving on tonight'], gap: 1.5, kind: 'chorus' },
+    hook: { phrases: ['走れ', '今', '叫べ', '跳べ'], gap: 1.2, kind: 'hook' },
+    bridge: { phrases: ['静かな', '夜に', '星が', 'ひとつ', '落ちて', 'きらり', 'と', '消えた'], gap: 0.9, kind: 'bridge' },
+    one: { phrases: ['星'], gap: 1.5, kind: 'hook' },
+    max: { phrases: ['遠く離れた街の灯りが', '揺れる窓に映って', '眠れない夜を越えて', 'ずっと歩いていく'], gap: 1.4, kind: 'chorus' },
+    en: { phrases: ['Take your heart', 'and run away'], gap: 1.4, kind: 'chorus' },
+    long: { phrases: ['誰も知らない明日の扉を', '今この手で開けて', 'We will find our way'], gap: 1.6, kind: 'climax' },
+  };
+  // Google Fonts subset to exactly the glyphs this page draws (text=…): one
+  // small file per family instead of hundreds of unicode-range slices.
+  // ?fonts=full loads the regular (complete) stylesheet instead.
+  (function () {
+    const q = new URLSearchParams(location.search);
+    const fams = ['Anton', 'Archivo+Black', 'Bebas+Neue', 'Dela+Gothic+One', 'DotGothic16', 'Kaisei+Decol:wght@700',
+      'Noto+Sans+JP:wght@500;900', 'Noto+Sans+SC:wght@900', 'Noto+Serif+JP:wght@900', 'Permanent+Marker', 'Potta+One',
+      'Rampart+One', 'Reggae+One', 'RocknRoll+One', 'Shippori+Mincho+B1:wght@800', 'Zen+Antique'];
+    let text = '';
+    if (q.get('fonts') !== 'full') {
+      let all = Object.values(window.LYRIC_FIXTURES).map((f) => f.phrases.join('')).join('') + (q.get('text') || '') + (q.get('extra') || '');
+      all += 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン#%&@*+=?!<>/01X★国あア星、。「」ー〜…・';
+      for (let c = 32; c < 127; c++) all += String.fromCharCode(c);
+      text = '&text=' + encodeURIComponent(Array.from(new Set(Array.from(all))).join(''));
+    }
+    const href = 'https://fonts.googleapis.com/css2?family=' + fams.join('&family=') + '&display=block' + text;
+    // The sheet is inserted dynamically (non-blocking): expose its arrival so
+    // font loading waits for the @font-face rules to exist. Retried because
+    // flaky networks/proxies sometimes drop the request.
+    window.LYRIC_FONT_FAMILIES = fams.length + 1; // Noto Sans JP has two weights
+    window.LYRIC_FONT_CSS = new Promise((res) => {
+      let tries = 0;
+      const add = () => {
+        const l = document.createElement('link');
+        l.rel = 'stylesheet';
+        l.href = href + (tries ? '&retry=' + tries : '');
+        l.onload = () => res(true);
+        l.onerror = () => { l.remove(); if (++tries < 4) setTimeout(add, 400 * tries); else res(false); };
+        document.head.appendChild(l);
+      };
+      add();
+      setTimeout(() => res(false), 30000);
+    });
+  })();
+</script>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; background: #0A0A0A; color: #fff; font-family: "Noto Sans JP", system-ui, sans-serif; }
+  .bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 10px 14px; }
+  .bar h1 { margin: 0 10px 0 0; font: 400 26px/1 Anton, Impact, sans-serif; letter-spacing: .04em; transform: skewX(-12deg); text-shadow: 3px 3px 0 #E60012; }
+  .bar label { font-size: 12px; color: rgba(255,255,255,.7); display: flex; gap: 6px; align-items: center; }
+  .bar select, .bar input { background: #1D1D1F; color: #fff; border: 1px solid #333; padding: 5px 6px; font: inherit; font-size: 13px; }
+  .bar input[type=range] { width: 320px; padding: 0; }
+  .bar button { border: 0; padding: 8px 12px; font-weight: 900; background: #fff; color: #0A0A0A; transform: skewX(-12deg); box-shadow: 3px 3px 0 #E60012; cursor: pointer; }
+  .note { font-size: 12px; color: rgba(255,255,255,.5); }
+  .stage { width: min(100vw - 28px, (100vh - 120px) * 16 / 9); margin: 0 14px; aspect-ratio: 16 / 9; }
+  #cv { width: 100%; height: 100%; display: block; background: #000; }
+  body.shot .bar { display: none; }
+  body.shot .stage { width: 1920px; margin: 0; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <h1>DEV · LYRICS</h1>
+  <label>样式 style <select id="style"></select></label>
+  <label>示例 line <select id="fx"></select></label>
+  <label>背景 bg <select id="bg"></select></label>
+  <label>时间 t <input id="t" type="range" min="-0.5" max="10" step="0.01"></label>
+  <span id="tv" class="note"></span>
+  <button id="play" type="button">▶ / ❚❚</button>
+  <label><input id="grid" type="checkbox"> 安全区 safe</label>
+  <span class="note">Invented placeholder lines only</span>
+</div>
+<div class="stage"><canvas id="cv" width="1920" height="1080"></canvas></div>
+
+<script src="../js/core.js"></script>
+<script src="../data/hoshi-to-bokura-to.js"></script>
+<script src="dev-env.js"></script>
+<script src="../js/render/lyricfx.js"></script>
+<script>
+/*
+ * Lyric-style dev page. URL params:
+ *   style=ransom|slash|impact|dialog|vertical|card|split|glitch
+ *   fx=<fixture id>       (see FIXTURES; invented placeholder text)
+ *   text=a|b|c            custom placeholder phrases ('|' separated)
+ *   t=<sec from line start> or moment=lead|mid|full|exit
+ *   bg=red|black|night|city|white|scene:<name>
+ *   kind=<section kind for env>  grid=1  anim=1  shot=1 (1:1 canvas, no chrome)
+ * Test API: window.LyricDev = { ready, fixtures, styles, render(o), moments(o), check(o), perf(o) }
+ */
+(function () {
+  'use strict';
+  const MV = window.MV;
+  const qs = new URLSearchParams(location.search);
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  if (qs.get('shot') === '1') document.body.classList.add('shot');
+
+  const FIXTURES = window.LYRIC_FIXTURES;
+  const STYLES = ['ransom', 'slash', 'impact', 'dialog', 'vertical', 'card', 'split', 'glitch'];
+  const BGS = ['red', 'black', 'night', 'city', 'white'];
+  const START = 2.0;
+
+  const lineCache = new Map();
+  function makeLine(o) {
+    const key = JSON.stringify(o);
+    if (lineCache.has(key)) return lineCache.get(key);
+    const fx = o.text ? { phrases: String(o.text).split('|'), gap: o.gap || 1.5, kind: o.kind || 'chorus' } : FIXTURES[o.fx] || FIXTURES.jp3;
+    const line = MV.devLine(fx.phrases, { start: START, gap: o.gap || fx.gap, style: o.style, kind: o.kind || fx.kind, seed: o.seed || 7 });
+    line.key = o.key || null;
+    lineCache.set(key, line);
+    return line;
+  }
+  const layoutCache = new Map();
+  function getLayout(style, line) {
+    const k = style + '|' + line.text + '|' + line.seed + '|' + MV.LyricFX.epoch();
+    let L = layoutCache.get(k);
+    if (!L) {
+      L = MV.lyricStyles.get(style).layout(line, ctx);
+      layoutCache.set(k, L);
+    }
+    return L;
+  }
+  // lt the way a Director would build it (0.3 s in / 0.3 s out).
+  function ltFor(line, t) {
+    return {
+      t: t - line.start,
+      in: MV.clamp((t - line.showStart) / 0.3),
+      out: MV.clamp((t - (line.showEnd - 0.3)) / 0.3),
+      showStart: line.showStart,
+      showEnd: line.showEnd,
+    };
+  }
+  function momentTime(line, m) {
+    const last = line.charTimes.length ? Math.max.apply(null, Array.from(line.charTimes)) : line.start;
+    switch (m) {
+      case 'lead': return line.showStart + 0.14;
+      case 'first': return line.start + 0.1;
+      case 'mid': {
+        const ph = line.phrases;
+        if (ph.length > 1) return ph[Math.floor(ph.length / 2)].start + 0.08;
+        return line.start + 0.1;
+      }
+      case 'full': return last + 0.45;
+      case 'exit': return line.showEnd - 0.15;
+      case 'exit2': return line.showEnd - 0.06;
+      default: return Number(m) + line.start;
+    }
+  }
+
+  /* ---------------- backdrops (busy on purpose) ---------------- */
+  const bgCache = {};
+  function backdrop(name, g, t) {
+    const C = MV.C, W = 1920, H = 1080;
+    if (name && name.indexOf('scene:') === 0 && MV.scenes) {
+      const sc = MV.scenes.get(name.slice(6));
+      if (sc) {
+        try {
+          if (!sc._devPrepared && sc.prepare) { sc.prepare({ W, H, width: W, height: H, scale: 1 }); }
+          sc._devPrepared = true;
+          sc.draw(g, MV.devEnv(t, {}), { seed: 5, lt: t, dur: 8, variant: 0, speed: 1, intensity: 0.8 });
+          return;
+        } catch (e) { console.warn(e); }
+      }
+      name = 'red';
+    }
+    if (!bgCache[name]) {
+      const c = MV.makeCanvas(W, H), x = c.ctx;
+      if (name === 'red') {
+        x.fillStyle = C.red; x.fillRect(0, 0, W, H);
+        MV.draw.rays(x, 1250, 380, 28, 2600, 0.1, C.redDeep);
+        MV.draw.halftone(x, 0, 0, W, H, { cell: 22, angle: 0.3, color: C.ink, fn: (u, v) => 0.2 + 0.8 * MV.clamp(Math.hypot(u - 0.2, v - 0.9) - 0.2) * 0.9 });
+        x.fillStyle = C.black;
+        MV.draw.polygon(x, [[0, 760], [W, 520], [W, 700], [0, 980]]); x.fill();
+        x.fillStyle = C.white;
+        MV.draw.polygon(x, [[0, 740], [W, 500], [W, 520], [0, 760]]); x.fill();
+        for (let i = 0; i < 9; i++) { MV.draw.star(x, 200 + i * 200, 180 + (i % 3) * 90, 34, 14); x.fillStyle = i % 2 ? C.white : C.ink; x.fill(); }
+      } else if (name === 'black') {
+        x.fillStyle = C.black; x.fillRect(0, 0, W, H);
+        x.fillStyle = MV.patterns.stripes(x, { width: 40, colors: [C.black, C.gray] }); x.fillRect(0, 0, W, H);
+        for (let i = 0; i < 14; i++) {
+          x.fillStyle = i % 3 === 0 ? C.red : i % 3 === 1 ? C.white : C.redDeep;
+          const cx = MV.rand(3, i) * W, cy = MV.rand(4, i) * H, r = 80 + MV.rand(5, i) * 260;
+          MV.draw.polygon(x, [[cx, cy - r], [cx + r * 0.6, cy + r * 0.2], [cx - r * 0.3, cy + r * 0.5]]); x.fill();
+        }
+      } else if (name === 'night') {
+        x.fillStyle = C.night; x.fillRect(0, 0, W, H);
+        const gr = x.createRadialGradient(960, 1300, 100, 960, 900, 1300); gr.addColorStop(0, C.navy); gr.addColorStop(1, 'rgba(6,10,28,0)');
+        x.fillStyle = gr; x.fillRect(0, 0, W, H);
+        for (let i = 0; i < 260; i++) { x.fillStyle = i % 17 === 0 ? C.red : C.star; const r = 0.6 + MV.rand(8, i) * 2.4; x.beginPath(); x.arc(MV.rand(6, i) * W, MV.rand(7, i) * H, r, 0, MV.TAU); x.fill(); }
+        for (let i = 0; i < 10; i++) { MV.draw.sparkle(x, MV.rand(9, i) * W, MV.rand(10, i) * H * 0.7, 10 + MV.rand(11, i) * 16); x.fillStyle = C.star; x.fill(); }
+        x.fillStyle = C.ink; MV.draw.polygon(x, [[0, 1080], [0, 930], [200, 930], [200, 880], [330, 880], [330, 950], [520, 950], [520, 860], [700, 860], [700, 960], [1100, 960], [1100, 900], [1300, 900], [1300, 940], [1920, 940], [1920, 1080]]); x.fill();
+      } else if (name === 'city') {
+        x.fillStyle = C.red; x.fillRect(0, 0, W, H);
+        x.fillStyle = MV.patterns.dots(x, { cell: 18, radius: 0.28, color: C.redDeep }); x.fillRect(0, 0, W, H);
+        x.fillStyle = C.ink;
+        let px = 0; let k = 0;
+        while (px < W) { const w = 80 + MV.rand(12, k) * 160, h = 200 + MV.rand(13, k) * 520; x.fillRect(px, H - h, w, h); px += w - 4; k++; }
+        x.strokeStyle = C.ink; x.lineWidth = 4;
+        for (let i = 0; i < 4; i++) { x.beginPath(); x.moveTo(0, 240 + i * 30); x.quadraticCurveTo(960, 360 + i * 30, 1920, 200 + i * 34); x.stroke(); }
+        x.fillRect(1500, 120, 18, 960);
+        x.fillStyle = C.white;
+        for (let i = 0; i < 90; i++) x.fillRect(MV.rand(14, i) * W, H - MV.rand(15, i) * 500, 10, 14);
+      } else {
+        x.fillStyle = C.paper; x.fillRect(0, 0, W, H);
+        x.fillStyle = MV.patterns.dots(x, { cell: 16, radius: 0.22, color: '#d9d2c3' }); x.fillRect(0, 0, W, H);
+      }
+      bgCache[name] = c.canvas;
+    }
+    g.drawImage(bgCache[name], 0, 0);
+  }
+  function drawGrid(g) {
+    const S = MV.LyricFX.SAFE, B = MV.LyricFX.BOX;
+    g.save();
+    g.setLineDash([12, 8]); g.lineWidth = 2; g.strokeStyle = '#00ff88';
+    g.strokeRect(S.x0, S.y0, S.x1 - S.x0, S.y1 - S.y0);
+    g.strokeStyle = '#00c8ff'; g.strokeRect(B.x0, B.y0, B.x1 - B.x0, B.y1 - B.y0);
+    g.setLineDash([]); g.fillStyle = 'rgba(0,200,255,0.25)';
+    for (const z of MV.LyricFX.HUD_ZONES) g.fillRect(z.x0, z.y0, z.x1 - z.x0, z.y1 - z.y0);
+    g.restore();
+  }
+
+  /**
+   * Render one frame into `g` (defaults to the page canvas).
+   * o = { style, fx|text, t (s from line start) | moment, bg, grid, kind }
+   */
+  function render(o, g) {
+    g = g || ctx;
+    const style = o.style || 'ransom';
+    const line = makeLine({ fx: o.fx, text: o.text, gap: o.gap, style, kind: o.kind, seed: o.seed, key: o.key });
+    const t = o.moment ? momentTime(line, o.moment) : line.start + (o.t == null ? 1 : Number(o.t));
+    const env = MV.devEnv(t, { kind: o.kind || line.sectionKind, intensity: o.intensity });
+    g.save();
+    g.setTransform(g.canvas.width / 1920, 0, 0, g.canvas.height / 1080, 0, 0);
+    backdrop(o.bg || 'red', g, t);
+    const L = getLayout(style, line);
+    const t0 = performance.now(); // dev timing only (not a render path)
+    MV.lyricStyles.get(style).draw(g, line, L, ltFor(line, t), env);
+    const ms = performance.now() - t0;
+    if (o.grid) drawGrid(g);
+    g.restore();
+    return { t, ms, check: MV.LyricFX.check(L), size: L.size, rows: (L.rows || []).length, glyphs: (L.glyphs || []).length, chars: line.chars.length };
+  }
+
+  const API = (window.LyricDev = {
+    fixtures: Object.keys(FIXTURES),
+    styles: STYLES,
+    render,
+    ready: null,
+    lineFor: (o) => makeLine(o),
+    /** Layout check for a style + fixture/text: bounds inside SAFE, clear of HUD. */
+    check(o) {
+      const line = makeLine(o);
+      const L = MV.lyricStyles.get(o.style).layout(line, ctx);
+      return Object.assign({ chars: line.chars.length, size: L.size, rows: (L.rows || []).length }, MV.LyricFX.check(L));
+    },
+    /** Check an arbitrary Line object (e.g. parsed at test time). */
+    checkLine(style, line) {
+      const L = MV.lyricStyles.get(style).layout(line, ctx);
+      return Object.assign({ chars: line.chars.length, size: L.size, rows: (L.rows || []).length }, MV.LyricFX.check(L));
+    },
+    /** ms per draw call over n frames across the line's visible window. */
+    perf(o) {
+      const line = makeLine(o);
+      const L = getLayout(o.style, line);
+      const off = MV.makeCanvas(1920, 1080).canvas.getContext('2d', { willReadFrequently: false });
+      const n = o.n || 60;
+      let tot = 0, max = 0;
+      for (let k = 0; k < n; k++) {
+        const t = line.showStart + ((line.showEnd - line.showStart) * k) / n;
+        off.clearRect(0, 0, 1920, 1080);
+        off.getImageData(0, 0, 1, 1);
+        const t0 = performance.now();
+        MV.lyricStyles.get(o.style).draw(off, line, L, ltFor(line, t), MV.devEnv(t, {}));
+        off.getImageData(0, 0, 1, 1); // force rasterisation so the timing is honest
+        const d = performance.now() - t0;
+        tot += d; max = Math.max(max, d);
+      }
+      return { avg: tot / n, max };
+    },
+    /** Hash of a rendered frame (determinism check). */
+    hash(o) {
+      const c = MV.makeCanvas(480, 270);
+      render(o, c.ctx);
+      const d = c.ctx.getImageData(0, 0, 480, 270).data;
+      let h = 0x811c9dc5;
+      for (let i = 0; i < d.length; i += 3) { h ^= d[i]; h = Math.imul(h, 0x01000193) >>> 0; }
+      return h;
+    },
+    /** Contact sheet: rows = fixtures, cols = moments, cell 480x270. */
+    sheet(o) {
+      const fxs = o.fxs || Object.keys(FIXTURES), ms = o.moments || ['lead', 'mid', 'full', 'exit'];
+      const cw = o.cw || 480, ch = Math.round(cw * 9 / 16);
+      cv.width = cw * ms.length; cv.height = ch * fxs.length;
+      const tmp = MV.makeCanvas(1920, 1080);
+      fxs.forEach((fx, r) => ms.forEach((m, c) => {
+        render({ style: o.style, fx, moment: m, bg: o.bg || (r % 2 ? 'black' : 'red'), grid: o.grid }, tmp.ctx);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(tmp.canvas, c * cw, r * ch, cw, ch);
+        ctx.fillStyle = 'rgba(0,0,0,.7)'; ctx.fillRect(c * cw, r * ch, 150, 22);
+        ctx.fillStyle = '#fff'; ctx.font = '14px monospace'; ctx.fillText(fx + ' · ' + m, c * cw + 6, r * ch + 16);
+      }));
+      return { w: cv.width, h: cv.height };
+    },
+  });
+
+  /* ---------------- interactive UI ---------------- */
+  const $ = (id) => document.getElementById(id);
+  STYLES.forEach((s) => $('style').add(new Option(s, s)));
+  Object.keys(FIXTURES).forEach((f) => $('fx').add(new Option(f + ' — ' + FIXTURES[f].phrases.join(' '), f)));
+  BGS.concat(MV.scenes ? MV.scenes.list().map((n) => 'scene:' + n) : []).forEach((b) => $('bg').add(new Option(b, b)));
+  $('style').value = qs.get('style') || 'ransom';
+  $('fx').value = qs.get('fx') || 'jp3';
+  $('bg').value = qs.get('bg') || 'red';
+  $('grid').checked = qs.get('grid') === '1';
+  let playing = qs.get('anim') === '1';
+  let tt = qs.get('t') != null ? Number(qs.get('t')) : 1;
+  function ui() {
+    const o = { style: $('style').value, fx: $('fx').value, text: qs.get('text'), bg: $('bg').value, grid: $('grid').checked, kind: qs.get('kind') };
+    const line = makeLine({ fx: o.fx, text: o.text, style: o.style, kind: o.kind });
+    $('t').min = (line.showStart - line.start - 0.2).toFixed(2);
+    $('t').max = (line.showEnd - line.start + 0.2).toFixed(2);
+    if (qs.get('moment') && !ui.done) { tt = momentTime(line, qs.get('moment')) - line.start; ui.done = true; }
+    $('t').value = tt;
+    const r = render(Object.assign(o, { t: tt }));
+    $('tv').textContent = 't=' + tt.toFixed(2) + 's · ' + r.ms.toFixed(1) + ' ms · size ' + Math.round(r.size || 0) + ' · ' + (r.check.ok ? 'fits' : 'OUT OF SAFE AREA');
+    return line;
+  }
+  ['style', 'fx', 'bg', 'grid'].forEach((id) => $(id).addEventListener('input', ui));
+  $('t').addEventListener('input', () => { tt = Number($('t').value); ui(); });
+  $('play').addEventListener('click', () => { playing = !playing; if (playing) loop.last = 0; });
+  function loop(now) {
+    if (playing) {
+      const dt = loop.last ? (now - loop.last) / 1000 : 0;
+      loop.last = now;
+      tt += dt;
+      const line = makeLine({ fx: $('fx').value, text: qs.get('text'), style: $('style').value });
+      if (tt > line.showEnd - line.start + 0.3) tt = line.showStart - line.start - 0.2;
+    } else loop.last = 0;
+    if (!document.body.classList.contains('shot') || playing) ui();
+    requestAnimationFrame(loop);
+  }
+  const sample = Object.values(FIXTURES).map((f) => f.phrases.join('')).join('') + (qs.get('text') || '') + MV.LyricFX.fontSample;
+  API.ready = window.LYRIC_FONT_CSS.then(() => MV.fonts.ensure(sample, 20000)).then(() => document.fonts && document.fonts.ready).then(() => { layoutCache.clear(); ui(); return true; });
+  ui();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

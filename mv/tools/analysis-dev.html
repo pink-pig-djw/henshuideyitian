@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Analysis Inspector</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --red: #E60012; --red-deep: #A3000E; --black: #0A0A0A; --ink: #000; --white: #FFF; --paper: #F3EFE6;
+    --gray: #1D1D1F; --night: #060A1C; --navy: #101A45; --star: #FFF4D6; --cyan: #8EDBFF; --yellow: #FFE14D;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--black); color: var(--white); }
+  body { font: 14px/1.4 "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Microsoft YaHei", system-ui, sans-serif; padding: 0 16px 24px; overflow-x: hidden; }
+  header { display: flex; align-items: center; gap: 16px; padding: 16px 0 12px; flex-wrap: wrap; }
+  .brand { position: relative; padding: 6px 22px 8px 16px; background: var(--red); transform: skewX(-12deg); box-shadow: 6px 6px 0 var(--ink); }
+  .brand span { display: inline-block; transform: skewX(12deg); font: italic 900 26px/1 "Anton", "Impact", "Arial Narrow", sans-serif; letter-spacing: 1px; }
+  .brand small { display: block; transform: skewX(12deg); font-size: 11px; letter-spacing: 3px; opacity: .9; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button, label.btn, select {
+    background: var(--white); color: var(--ink); border: 3px solid var(--ink); padding: 6px 14px; font: 800 13px/1 system-ui, sans-serif;
+    transform: skewX(-8deg); box-shadow: 4px 4px 0 var(--red); cursor: pointer; border-radius: 0;
+  }
+  button:hover, label.btn:hover { background: var(--yellow); }
+  button:active { transform: skewX(-8deg) translate(2px, 2px); box-shadow: 2px 2px 0 var(--red); }
+  button:disabled { opacity: .45; cursor: default; }
+  label.btn input { display: none; }
+  #status { font-size: 13px; color: var(--paper); min-height: 1.4em; }
+  #status b { color: var(--yellow); }
+  .panel { position: relative; margin-top: 12px; border: 3px solid var(--white); background: var(--gray); }
+  .panel h2 { position: absolute; top: -14px; left: 12px; margin: 0; padding: 2px 10px; background: var(--white); color: var(--ink); font: italic 900 13px/1.2 "Anton", Impact, sans-serif; letter-spacing: 2px; transform: skewX(-12deg); }
+  canvas { display: block; width: 100%; }
+  #overview { height: 300px; cursor: crosshair; }
+  #zoom { height: 350px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 820px) { .grid { grid-template-columns: 1fr; } #overview { height: 260px; } }
+  pre { margin: 0; padding: 18px 12px 12px; font: 12px/1.45 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; color: var(--paper); white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow: auto; }
+  .drop { outline: 4px dashed var(--red); outline-offset: -8px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; padding: 6px 12px 8px; font-size: 12px; color: var(--paper); }
+  .legend i { display: inline-block; width: 12px; height: 12px; margin-right: 5px; vertical-align: -2px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span>ANALYSIS INSPECTOR</span><small>音频分析 · 节拍 · 段落</small></div>
+  <div class="controls">
+    <button id="btnLoad">载入 song.mp3 (Load)</button>
+    <label class="btn">选择文件… (File)<input id="file" type="file" accept="audio/*"></label>
+    <button id="btnPlay" disabled>▶ 播放 (Play)</button>
+    <select id="rate" title="播放速度 (rate)">
+      <option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option>
+    </select>
+    <button id="btnPreset" disabled>套用预设 (Apply preset)</button>
+    <button id="btnClick" disabled>节拍器 (Clicks)</button>
+  </div>
+  <div id="status">拖放音频文件到页面，或点击「载入」。(Drop an audio file or press Load.)</div>
+</header>
+
+<div class="panel"><h2>OVERVIEW</h2><canvas id="overview"></canvas>
+  <div class="legend">
+    <span><i style="background:#FFFFFF"></i>rms</span><span><i style="background:#E60012"></i>low</span><span><i style="background:#FFE14D"></i>mid</span>
+    <span><i style="background:#8EDBFF"></i>high</span><span><i style="background:#FFF4D6"></i>flux</span><span><i style="background:#A3000E"></i>novelty vs preset ref</span>
+  </div>
+</div>
+<div class="grid">
+  <div class="panel"><h2>BEAT ZOOM ±4 s</h2><canvas id="zoom"></canvas></div>
+  <div class="panel"><h2>FEATURES</h2><pre id="info">—</pre></div>
+</div>
+
+<script src="../js/core.js"></script>
+<script src="../data/hoshi-to-bokura-to.js"></script>
+<script src="../js/analysis.js"></script>
+<script src="../js/audio.js"></script>
+<script>
+(function () {
+  'use strict';
+  const MV = window.MV, C = MV.C, A = MV.Analysis;
+  const $ = (id) => document.getElementById(id);
+  const eng = new MV.AudioEngine();
+  const state = { features: null, computed: null, match: null, buffer: null, analysisMs: 0, clicks: false, lastClickBeat: -1 };
+  const params = new URLSearchParams(location.search);
+
+  const KIND_COLORS = {
+    intro: C.navy, verse: '#3A3A3E', pre: C.redDeep, chorus: C.red, hook: C.redHot, interlude: '#5A5A60',
+    bridge: C.night, build: '#2B3B8F', climax: C.red, outro: C.navy,
+  };
+
+  function setStatus(html) { $('status').innerHTML = html; }
+
+  /* ---------------- loading & analysis ---------------- */
+  async function analyze(buffer) {
+    state.buffer = buffer;
+    setStatus('分析中… (analysing) 0%');
+    const t0 = performance.now();
+    const f = await A.compute(buffer, { onProgress: (p) => setStatus('分析中… (analysing) ' + Math.round(p * 100) + '%') });
+    state.analysisMs = performance.now() - t0;
+    state.computed = { beats: f.beats, downbeats: f.downbeats, sections: f.sections, bpm: f.bpm };
+    state.features = f;
+    state.match = A.matchPreset(f);
+    $('btnPlay').disabled = false;
+    $('btnClick').disabled = false;
+    $('btnPreset').disabled = !state.match;
+    if (state.match && params.get('preset') !== '0') applyPreset();
+    setStatus(`<b>${eng.name}</b> · ${buffer.duration.toFixed(2)} s · ${buffer.sampleRate} Hz · 分析 ${state.analysisMs.toFixed(0)} ms · BPM <b>${state.computed.bpm}</b>` +
+      (state.match ? ` · 预设 <b>${state.match.preset.id}</b> offset ${state.match.offset.toFixed(3)} s, conf ${state.match.confidence.toFixed(2)}` : ' · 无匹配预设 (no preset match)'));
+    renderInfo();
+    return f;
+  }
+
+  function applyPreset() {
+    const f = state.features;
+    if (!f || !state.match) return;
+    if (f.source === 'preset') A.restoreComputed(f);
+    else A.applyPreset(f, state.match.preset, state.match.offset, state.match.confidence);
+    $('btnPreset').textContent = f.source === 'preset' ? '用计算结果 (Use computed)' : '套用预设 (Apply preset)';
+    renderInfo();
+  }
+
+  async function loadURL(url) {
+    try {
+      setStatus('载入中… (loading)');
+      const buf = await eng.loadURL(url);
+      return await analyze(buf);
+    } catch (e) {
+      setStatus('⚠ ' + e.message);
+      return null;
+    }
+  }
+  async function loadFile(file) {
+    try {
+      setStatus('解码中… (decoding)');
+      const buf = await eng.loadFile(file);
+      return await analyze(buf);
+    } catch (e) {
+      setStatus('⚠ ' + e.message);
+      return null;
+    }
+  }
+
+  $('btnLoad').onclick = () => loadURL('../assets/song.mp3');
+  $('file').onchange = (e) => e.target.files[0] && loadFile(e.target.files[0]);
+  $('btnPlay').onclick = () => { eng.unlock(); eng.toggle(); };
+  $('rate').onchange = (e) => eng.setRate(+e.target.value);
+  $('btnPreset').onclick = applyPreset;
+  $('btnClick').onclick = () => { state.clicks = !state.clicks; $('btnClick').style.background = state.clicks ? C.yellow : ''; };
+  document.addEventListener('dragover', (e) => { e.preventDefault(); document.body.classList.add('drop'); });
+  document.addEventListener('dragleave', () => document.body.classList.remove('drop'));
+  document.addEventListener('drop', (e) => {
+    e.preventDefault();
+    document.body.classList.remove('drop');
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) loadFile(f);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.target && /INPUT|SELECT/.test(e.target.tagName)) return;
+    if (e.code === 'Space') { e.preventDefault(); eng.unlock(); eng.toggle(); }
+    if (e.code === 'ArrowLeft') eng.seek(eng.currentTime - (e.shiftKey ? 10 : 2));
+    if (e.code === 'ArrowRight') eng.seek(eng.currentTime + (e.shiftKey ? 10 : 2));
+  });
+  eng.on('play', () => ($('btnPlay').textContent = '❚❚ 暂停 (Pause)'));
+  eng.on('pause', () => ($('btnPlay').textContent = '▶ 播放 (Play)'));
+  eng.on('ended', () => ($('btnPlay').textContent = '▶ 播放 (Play)'));
+  eng.on('blocked', () => setStatus('🔇 浏览器阻止了自动播放，请点击页面 (click to enable audio)'));
+
+  /* ---------------- canvas helpers ---------------- */
+  function fitCanvas(cv) {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const w = Math.max(1, Math.round(cv.clientWidth * dpr)), h = Math.max(1, Math.round(cv.clientHeight * dpr));
+    if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+    const ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { ctx, w: cv.clientWidth, h: cv.clientHeight };
+  }
+
+  // Filled mean per pixel column (+ a faint max outline when zoomed out).
+  function drawEnvelope(ctx, arr, fps, t0, t1, x0, w, yBase, hgt, color, fill, outline) {
+    const n = arr.length;
+    const cols = Math.max(2, Math.floor(w));
+    const mean = new Float32Array(cols + 1), max = new Float32Array(cols + 1);
+    for (let c = 0; c <= cols; c++) {
+      const ta = t0 + ((t1 - t0) * c) / cols, tb = t0 + ((t1 - t0) * (c + 1)) / cols;
+      const a = Math.max(0, Math.floor(ta * fps)), b = Math.min(n - 1, Math.max(a, Math.floor(tb * fps)));
+      let s = 0, mx = 0, k = 0;
+      for (let i = a; i <= b; i++) {
+        s += arr[i];
+        if (arr[i] > mx) mx = arr[i];
+        k++;
+      }
+      if (ta < 0 || ta * fps > n - 1) k = 0;
+      mean[c] = k ? s / k : 0;
+      max[c] = k ? mx : 0;
+    }
+    ctx.beginPath();
+    ctx.moveTo(x0, yBase);
+    for (let c = 0; c <= cols; c++) ctx.lineTo(x0 + (w * c) / cols, yBase - mean[c] * hgt);
+    ctx.lineTo(x0 + w, yBase);
+    ctx.closePath();
+    ctx.globalAlpha = fill;
+    ctx.fillStyle = color;
+    ctx.fill();
+    if (outline) {
+      ctx.globalAlpha = outline;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let c = 0; c <= cols; c++) {
+        const x = x0 + (w * c) / cols, y = yBase - max[c] * hgt;
+        if (c === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawSections(ctx, secs, t0, t1, x0, w, y, h, label) {
+    if (!secs) return;
+    const X = (t) => x0 + ((t - t0) / (t1 - t0)) * w;
+    secs.forEach((s, i) => {
+      const a = X(s.start), b = X(s.end);
+      if (b < x0 || a > x0 + w) return;
+      ctx.fillStyle = KIND_COLORS[s.kind] || '#444';
+      ctx.fillRect(a, y, b - a, h);
+      ctx.fillStyle = C.black;
+      ctx.fillRect(a, y, 2, h);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(a, y, b - a, h);
+      ctx.clip();
+      ctx.fillStyle = C.white;
+      ctx.font = '800 11px system-ui, sans-serif';
+      ctx.fillText(s.kind.toUpperCase() + (s.credits ? ' ★' : ''), a + 5, y + h - 6);
+      ctx.restore();
+    });
+    ctx.fillStyle = 'rgba(255,255,255,.6)';
+    ctx.font = '700 10px system-ui, sans-serif';
+    ctx.fillText(label, x0 + w + 6, y + h - 6);
+  }
+
+  /* ---------------- overview ---------------- */
+  // Static layer (sections, envelopes, novelty) cached per features/source/size.
+  const ovCache = { key: '', canvas: document.createElement('canvas') };
+  let refBytes = null;
+
+  function overviewStatic(w, h, dpr) {
+    const f = state.features;
+    const key = [w, h, dpr, f.source, f.presetOffset, f.length].join('|');
+    if (ovCache.key === key) return ovCache.canvas;
+    const cv = ovCache.canvas;
+    cv.width = Math.round(w * dpr);
+    cv.height = Math.round(h * dpr);
+    const ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = C.black;
+    ctx.fillRect(0, 0, w, h);
+    const x0 = 10, W = w - 90, dur = f.duration;
+    drawSections(ctx, state.computed.sections, 0, dur, x0, W, 8, 24, 'COMPUTED');
+    const preset = state.match && state.match.preset;
+    if (preset) {
+      const off = state.match.offset;
+      drawSections(ctx, preset.sections.map((s) => ({ kind: s.kind, start: s.start + off, end: s.end + off, credits: s.credits })), 0, dur, x0, W, 36, 24, 'PRESET');
+    }
+    const rows = [['rms', C.white], ['low', C.red], ['mid', C.yellow], ['high', C.cyan], ['flux', C.star]];
+    const top = 70, rowH = (h - top - 46) / rows.length;
+    rows.forEach(([k, col], i) => {
+      const yb = top + rowH * (i + 1) - 2;
+      ctx.fillStyle = 'rgba(255,255,255,.05)';
+      ctx.fillRect(x0, yb - rowH + 4, W, rowH - 4);
+      drawEnvelope(ctx, f[k], f.fps, 0, dur, x0, W, yb, rowH - 6, col, 0.9, 0.35);
+      ctx.fillStyle = 'rgba(255,255,255,.7)';
+      ctx.font = '700 10px system-ui, sans-serif';
+      ctx.fillText(k.toUpperCase(), x0 + W + 6, yb - 4);
+    });
+    const yN = h - 8, hN = 32;
+    drawEnvelope(ctx, f.novelty, 1 / f.noveltyHop, 0, dur, x0, W, yN, hN, C.red, 1, 0.8);
+    if (preset && preset.refEnvelope) {
+      if (!refBytes) refBytes = A._internal.b64decode(preset.refEnvelope.data);
+      const ref = refBytes, hop = preset.refEnvelope.hop, off = state.match.offset;
+      ctx.strokeStyle = C.white;
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 0.5;
+      ctx.beginPath();
+      const cols = Math.floor(W);
+      for (let c = 0; c <= cols; c++) {
+        const t = (c / cols) * dur - off;
+        const i0 = Math.max(0, Math.floor(t / hop)), i1 = Math.min(ref.length - 1, Math.floor((t + dur / cols) / hop));
+        let v = 0;
+        for (let i = i0; i <= i1; i++) v = Math.max(v, ref[i] / 255);
+        if (c === 0) ctx.moveTo(x0 + c, yN - v * hN);
+        else ctx.lineTo(x0 + c, yN - v * hN);
+      }
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    ctx.fillStyle = 'rgba(255,255,255,.7)';
+    ctx.font = '700 10px system-ui, sans-serif';
+    ctx.fillText('NOVELTY', x0 + W + 6, yN - 4);
+    ovCache.key = key;
+    return cv;
+  }
+
+  function drawOverview() {
+    const { ctx, w, h } = fitCanvas($('overview'));
+    const f = state.features;
+    if (!f || !state.computed) {
+      ctx.fillStyle = C.black;
+      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = 'rgba(255,255,255,.35)';
+      ctx.font = 'italic 900 28px Impact, sans-serif';
+      ctx.fillText('NO AUDIO', 20, h / 2);
+      return;
+    }
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    ctx.drawImage(overviewStatic(w, h, dpr), 0, 0, w, h);
+    const x0 = 10, W = w - 90;
+    const px = x0 + (eng.currentTime / f.duration) * W;
+    ctx.fillStyle = C.red;
+    ctx.fillRect(px - 1.5, 4, 3, h - 8);
+    ctx.fillStyle = C.white;
+    ctx.font = '800 12px system-ui, sans-serif';
+    ctx.fillText(MV.fmtTime(eng.currentTime), Math.min(px + 6, x0 + W - 60), 66);
+  }
+
+  /* ---------------- zoom ---------------- */
+  function drawZoom() {
+    const { ctx, w, h } = fitCanvas($('zoom'));
+    ctx.fillStyle = C.night;
+    ctx.fillRect(0, 0, w, h);
+    const f = state.features;
+    if (!f || !state.computed) return;
+    const t = eng.currentTime, span = 4;
+    const t0 = t - span, t1 = t + span, x0 = 0, W = w;
+    const X = (tt) => x0 + ((tt - t0) / (t1 - t0)) * W;
+    // envelopes
+    drawEnvelope(ctx, f.low, f.fps, t0, t1, x0, W, h - 40, 110, C.red, 0.55);
+    drawEnvelope(ctx, f.flux, f.fps, t0, t1, x0, W, h - 40, 110, C.star, 0.35);
+    // computed grid
+    const cb = state.computed.beats, cd = new Set(state.computed.downbeats);
+    cb.forEach((b) => {
+      if (b < t0 || b > t1) return;
+      const x = X(b), down = cd.has(b);
+      ctx.fillStyle = down ? C.red : 'rgba(255,255,255,.75)';
+      ctx.fillRect(x - (down ? 2.5 : 1), 30, down ? 5 : 2, h - 84);
+    });
+    // preset grid (below)
+    const preset = state.match && state.match.preset;
+    if (preset) {
+      const off = state.match.offset, ph = preset.downbeatPhase | 0;
+      preset.beats.forEach((b, k) => {
+        const tt = b + off;
+        if (tt < t0 || tt > t1) return;
+        const x = X(tt), down = k % 4 === ph;
+        ctx.fillStyle = down ? C.yellow : C.cyan;
+        ctx.fillRect(x - (down ? 2 : 1), h - 36, down ? 4 : 2, down ? 22 : 12);
+      });
+    }
+    // onsets & kicks
+    f.onsets.forEach((o) => {
+      if (o.t < t0 || o.t > t1) return;
+      ctx.fillStyle = C.cyan;
+      ctx.fillRect(X(o.t) - 1, 30, 2, 4 + 14 * o.s);
+    });
+    f.kicks.forEach((k) => {
+      if (k < t0 || k > t1) return;
+      ctx.fillStyle = C.redHot;
+      MV.draw.star(ctx, X(k), h - 50, 6, 2.5, 5);
+      ctx.fill();
+    });
+    // playhead
+    ctx.fillStyle = C.white;
+    ctx.fillRect(X(t) - 1, 0, 2, h);
+    // live beat pulse (MV.Analysis.beatInfo on the active grid)
+    const bi = A.beatInfo(f, t);
+    const r = 16 + 22 * bi.pulse;
+    ctx.save();
+    ctx.translate(w - 56, 56);
+    ctx.fillStyle = bi.beatInBar === 0 ? C.red : C.white;
+    MV.draw.star(ctx, 0, 0, r, r * 0.45, 5);
+    ctx.fill();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = C.ink;
+    ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = C.white;
+    ctx.font = 'italic 900 22px Impact, "Arial Narrow", sans-serif';
+    ctx.fillText(`BAR ${bi.bar + 1} · ${bi.beatInBar + 1}/4`, 10, h - 14);
+    ctx.font = '700 11px system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,.8)';
+    ctx.fillText(`white/red = computed beat/downbeat · cyan/yellow = preset beat/downbeat · clock grid: ${f.source}`, 10, 22);
+    // metronome clicks
+    if (state.clicks && eng.playing && bi.index !== state.lastClickBeat && bi.sinceBeat < 0.05) {
+      state.lastClickBeat = bi.index;
+      click(bi.beatInBar === 0);
+    }
+  }
+
+  function click(accent) {
+    const ctx = eng.ctx;
+    if (!ctx) return;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.frequency.value = accent ? 1760 : 1320;
+    g.gain.setValueAtTime(0.25, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.05);
+    o.connect(g).connect(ctx.destination);
+    o.start();
+    o.stop(ctx.currentTime + 0.06);
+  }
+
+  $('overview').addEventListener('click', (e) => {
+    const f = state.features;
+    if (!f) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const W = rect.width - 90;
+    eng.seek(MV.clamp((e.clientX - rect.left - 10) / W) * f.duration);
+  });
+
+  function renderInfo() {
+    const f = state.features;
+    if (!f) return;
+    const lines = [];
+    lines.push(`duration  ${f.duration.toFixed(2)} s   sr ${f.sampleRate} Hz   frames ${f.length} @ ${f.fps} fps`);
+    lines.push(`analysis  ${state.analysisMs.toFixed(0)} ms (page)   source ${f.source}${f.presetId ? ' · ' + f.presetId + ' offset ' + f.presetOffset + ' conf ' + f.presetConfidence : ''}`);
+    lines.push(`tempo     ${f.bpm} BPM (computed ${state.computed.bpm})   beats ${f.beats.length}   downbeats ${f.downbeats.length}`);
+    lines.push(`events    onsets ${f.onsets.length}   kicks ${f.kicks.length}`);
+    lines.push('');
+    lines.push('sections  (' + f.source + ')');
+    f.sections.forEach((s) => lines.push(`  ${MV.fmtTime(s.start).padStart(8)} ${s.kind.padEnd(10)} int ${s.intensity.toFixed(2)}  E ${(s.energy || 0).toFixed(2)}  ${(s.scenes || []).join(',')}${s.credits ? '  credits' : ''}${s.endCard ? '  endCard' : ''}`));
+    $('info').textContent = lines.join('\n');
+  }
+
+  function frame() {
+    try {
+      drawOverview();
+      drawZoom();
+    } catch (e) {
+      console.error(e);
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // Test / console API.
+  window.AA = { eng, state, analyze, loadURL, loadFile, applyPreset, drawOverview, drawZoom };
+  if (params.get('auto') === '1') loadURL('../assets/song.mp3');
+})();
+</script>
+</body>
+</html>

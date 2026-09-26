@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dev · Sync editor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Dela+Gothic+One&family=Noto+Sans+JP:wght@500;700;900&family=Noto+Sans+SC:wght@500;700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../css/sync.css">
+<style>
+  /* Dev-page chrome only (the editor itself is styled by css/sync.css). */
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0A0A0A; color: #fff; font-family: "Noto Sans SC", "Noto Sans JP", system-ui, sans-serif; }
+  body { overflow: hidden; }
+  .dev-wrap { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 14px; padding: 18px; }
+  .dev-bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .dev-bar h1 { margin: 0 12px 0 0; font: 400 28px/1 Anton, Impact, sans-serif; letter-spacing: .05em; transform: skewX(-12deg); color: #fff; text-shadow: 3px 3px 0 #E60012; }
+  .dev-bar button { border: 0; padding: 10px 14px; font: 900 14px/1 inherit; font-family: inherit; background: #fff; color: #0A0A0A; transform: skewX(-12deg); box-shadow: 4px 4px 0 #E60012; cursor: pointer; }
+  .dev-bar button.red { background: #E60012; color: #fff; box-shadow: 4px 4px 0 #fff; }
+  .dev-bar .note { font-size: 12px; color: rgba(255,255,255,.55); }
+  .dev-stage { position: relative; width: min(100%, calc(100vw - 590px), calc((100vh - 120px) * 16 / 9)); aspect-ratio: 16 / 9; background: #000; }
+  @media (max-width: 900px) { .dev-stage { width: 100%; } }
+  canvas { width: 100%; height: 100%; display: block; }
+  textarea { display: none; }
+</style>
+</head>
+<body>
+<div class="dev-wrap">
+  <div class="dev-bar">
+    <h1>DEV · SYNC</h1>
+    <button id="open-sync" class="red" type="button">打开同步编辑器 SYNC</button>
+    <button id="play" type="button">▶ / ❚❚</button>
+    <span class="note" id="note">Stub engine · invented placeholder lyrics only</span>
+  </div>
+  <div class="dev-stage"><canvas id="cv" width="1920" height="1080"></canvas></div>
+</div>
+<textarea id="paste"></textarea>
+
+<script src="../js/core.js"></script>
+<script src="../data/hoshi-to-bokura-to.js"></script>
+<script src="../js/lyrics.js"></script>
+<script src="../js/sync.js"></script>
+<script>
+(function () {
+  'use strict';
+  const MV = window.MV;
+
+  /* ---------- Invented placeholder song (NOT real lyrics) ---------- */
+  const LINES = [
+    // text, phrase char offsets, phrase times, end, style
+    ['夜明けの駅で 君を待つ', [0, 7], [4.0, 6.2], 8.2, 'dialog'],
+    ['錆びた線路が 知らない街へ 続いてる', [0, 7, 14], [9.0, 10.8, 12.6], 14.6, 'slash'],
+    ['誰もいない屋上で 風を数えた', null, null, null, null, true],
+    ['紙の星座を 胸に抱いて', [0, 6], [16.0, 18.0], 20.2, 'ransom'],
+    ['走り出すんだ 今夜 We’re paper stars', [0, 7, 10], [20.6, 22.0, 23.2], 25.8, 'split'],
+    ['灯せ 遠く 高く 今', [0, 3, 6, 9], [27.0, 28.4, 29.8, 31.2], 33.0, 'impact'],
+    ['窓に映る赤い信号 まだ消えない', [0, 5, 10], [34.5, 36.4, 38.3], 40.5, 'vertical'],
+    ['紙の星座を 胸に抱いて', [0, 6], [42.0, 44.0], 46.0, 'ransom'],
+    ['走り出すんだ 今夜 We’re paper stars', [0, 7, 10], [46.4, 47.8, 49.0], 51.5, 'split'],
+  ];
+  const DURATION = 60;
+  const preset = {
+    id: 'dev-paper-stars',
+    meta: { title: '紙の星座', titleLatin: 'Kami no Seiza', artist: 'Dev Placeholder' },
+    match: { duration: DURATION, tolerance: 2 },
+    bpm: 100, beatsPerBar: 4,
+    beats: Array.from({ length: 100 }, (_, i) => +(0.2 + i * 0.6).toFixed(3)),
+    sections: [
+      { kind: 'intro', name: 'INTRO', start: 0, end: 3.8, intensity: 0.5 },
+      { kind: 'verse', name: 'VERSE', start: 3.8, end: 15.5, intensity: 0.3 },
+      { kind: 'chorus', name: 'CHORUS', start: 15.5, end: 26.5, intensity: 0.85 },
+      { kind: 'hook', name: 'HOOK', start: 26.5, end: 33.5, intensity: 0.75 },
+      { kind: 'bridge', name: 'BRIDGE', start: 33.5, end: 41.5, intensity: 0.2 },
+      { kind: 'chorus', name: 'CHORUS', start: 41.5, end: 52, intensity: 0.95 },
+      { kind: 'outro', name: 'OUTRO', start: 52, end: 60, intensity: 0.3 },
+    ],
+    leadIn: 0.3,
+    lines: LINES.map((l, i) => {
+      const d = MV.canonDisplay(l[0]);
+      const o = { n: i + 1, key: MV.lyricKey(d), len: Array.from(d).length };
+      if (l[5]) { o.skip = true; return o; }
+      o.style = l[4];
+      o.phrases = l[1].map((at, k) => ({ at, t: l[2][k] }));
+      o.end = l[3];
+      return o;
+    }),
+  };
+  MV.registerPreset(preset);
+  // What a user would paste: header, blank lines, double spaces.
+  const PASTE = ['**紙の星座**（Dev placeholder）', '歌手：Dev Placeholder', '作詞：作者A', '作曲：作者B', '']
+    .concat(LINES.map((l, i) => l[0].replace(/ /g, '  ') + (i === 1 || i === 4 ? '\n' : ''))).join('\n');
+  document.getElementById('paste').value = PASTE;
+
+  /* ---------- Stub audio engine (wall clock; freeze() for tests) ---------- */
+  class StubEngine {
+    constructor(duration) {
+      this.duration = duration; this.name = 'stub'; this._t0 = 0; this._wall = 0; this._playing = false;
+      this.rate = 1; this.frozen = null; this._ls = {}; this.calls = [];
+    }
+    get currentTime() {
+      if (this.frozen != null) return this.frozen;
+      if (!this._playing) return this._t0;
+      return Math.min(this.duration, this._t0 + ((performance.now() - this._wall) / 1000) * this.rate);
+    }
+    get playing() { return this._playing; }
+    play(from) { this.calls.push(['play', from]); this._t0 = from != null ? from : this.currentTime; this.frozen = null; this._wall = performance.now(); this._playing = true; this._emit('play'); }
+    pause() { this.calls.push(['pause']); this._t0 = this.currentTime; this._playing = false; this._emit('pause'); }
+    toggle() { this._playing ? this.pause() : this.play(); }
+    seek(t) { this.calls.push(['seek', t]); this._t0 = t; this.frozen = null; this._wall = performance.now(); this._emit('seek'); }
+    setRate(r) { this.calls.push(['rate', r]); this._t0 = this.currentTime; this._wall = performance.now(); this.rate = r; }
+    setVolume() {}
+    freeze(t) { this.frozen = t; this._t0 = t; }
+    on(ev, fn) { (this._ls[ev] = this._ls[ev] || []).push(fn); return () => { this._ls[ev] = this._ls[ev].filter((f) => f !== fn); }; }
+    _emit(ev) { (this._ls[ev] || []).forEach((f) => { try { f(); } catch (e) { console.error(e); } }); }
+  }
+  /* ---------- App-ish wiring ---------- */
+  // ?real=1 → real MV.AudioEngine + assets/song.mp3 (git-ignored) + the real
+  // timing preset; the lyric text is injected at runtime via devSync.setLyrics().
+  const REAL = new URLSearchParams(location.search).has('real');
+  const dev = (window.devSync = { applied: [], closed: 0, appSpaceCount: 0, real: REAL });
+  function wire(engine, pr, text) {
+    dev.engine = engine;
+    dev.preset = pr;
+    dev.text = text;
+    document.getElementById('paste').value = text;
+    dev.track = MV.Lyrics.parse(text, { preset: pr, offset: MV.SyncEditor.loadOffset(pr) });
+    if (dev.editor) dev.editor.destroy();
+    dev.editor = new MV.SyncEditor({
+      engine, preset: pr,
+      getTrack: () => dev.track,
+      getText: () => document.getElementById('paste').value,
+      onApply: (tr) => { dev.applied.push(tr); dev.track = tr; },
+      onClose: () => { dev.closed++; },
+    });
+  }
+  document.getElementById('open-sync').addEventListener('click', () => dev.editor && dev.editor.open());
+  document.getElementById('play').addEventListener('click', () => dev.engine && dev.engine.toggle());
+  // The real app binds Space to play/pause; the editor must swallow it while open.
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') { dev.appSpaceCount++; e.preventDefault(); if (dev.engine) dev.engine.toggle(); }
+  });
+  if (REAL) document.getElementById('note').textContent = 'Real AudioEngine · assets/song.mp3 · lyrics injected at runtime';
+  if (!REAL) {
+    wire(new StubEngine(DURATION), preset, PASTE);
+  } else {
+    dev.setLyrics = (text) => wire(dev.engine, MV.getPreset('hoshi-to-bokura-to'), text);
+    const sc = document.createElement('script');
+    sc.src = '../js/audio.js';
+    sc.onload = () => {
+      const eng = new MV.AudioEngine();
+      Promise.resolve(eng.loadURL('../assets/song.mp3'))
+        .then(() => { dev.engine = eng; dev.realReady = true; })
+        .catch((e) => { dev.error = String(e && e.message || e); });
+    };
+    sc.onerror = () => { dev.error = 'audio.js missing'; };
+    document.head.appendChild(sc);
+  }
+
+  /* ---------- Tiny preview renderer (context only; not the real Stage) ---------- */
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const C = MV.C;
+  function frame() {
+    requestAnimationFrame(frame);
+    const engine = dev.engine;
+    if (!engine) return;
+    const t = engine.currentTime;
+    const tr = dev.track;
+    const DUR = engine.duration || DURATION;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = C.black; ctx.fillRect(0, 0, 1920, 1080);
+    // diagonal red band + stripes
+    ctx.save();
+    ctx.translate(960, 560); ctx.rotate(-12 * Math.PI / 180);
+    ctx.fillStyle = C.red; ctx.fillRect(-1400, -150, 2800, 300);
+    ctx.fillStyle = MV.patterns.stripes(ctx, { width: 22, colors: ['rgba(0,0,0,0)', 'rgba(0,0,0,0.18)'] });
+    ctx.fillRect(-1400, -150, 2800, 300);
+    ctx.restore();
+    // halftone corner
+    ctx.fillStyle = MV.patterns.dots(ctx, { cell: 18, radius: 0.28, color: 'rgba(230,0,18,0.35)' });
+    ctx.fillRect(1320, 0, 600, 360);
+    // star-slash emblem (original)
+    ctx.save(); ctx.translate(1700, 190); ctx.rotate(0.2);
+    MV.draw.star(ctx, 0, 0, 110, 46); ctx.fillStyle = C.white; ctx.fill(); ctx.lineWidth = 10; ctx.strokeStyle = C.black; ctx.stroke();
+    ctx.rotate(-0.8); ctx.fillStyle = C.red; ctx.fillRect(-150, -12, 300, 24); ctx.restore();
+    // active lines, revealed by charTimes
+    const act = tr ? MV.Lyrics.activeLines(tr, t) : [];
+    act.slice(-2).forEach((line, j) => {
+      // Fit the line into ~1640 px (measured at 100 px, then scaled).
+      let w100 = 0;
+      line.chars.forEach((ch) => {
+        const latin = /[A-Za-z’']/.test(ch);
+        ctx.font = MV.text.font(latin ? 110 : 100, latin ? MV.FONTS.latinCond : MV.FONTS.jpHeavy, 400);
+        w100 += ctx.measureText(ch).width + (latin ? 2 : 0);
+      });
+      const size = Math.max(30, Math.min(92, Math.floor((1640 / Math.max(1, w100)) * 100)));
+      ctx.save();
+      ctx.translate(140, 530 + j * 130 - (act.length > 1 ? 70 : 0));
+      ctx.transform(1, 0, -0.2, 1, 0, 0);
+      let x = 0;
+      line.chars.forEach((ch, i) => {
+        const latin = /[A-Za-z’']/.test(ch);
+        ctx.font = MV.text.font(latin ? size * 1.1 : size, latin ? MV.FONTS.latinCond : MV.FONTS.jpHeavy, 400);
+        const w = ctx.measureText(ch).width;
+        const on = line.charTimes[i] <= t;
+        if (ch !== ' ') {
+          ctx.fillStyle = C.ink; ctx.fillText(ch, x + 8, 8);
+          ctx.fillStyle = on ? C.white : 'rgba(255,255,255,0.18)'; ctx.fillText(ch, x, 0);
+        }
+        x += w + (latin ? 2 : 0);
+      });
+      ctx.restore();
+    });
+    // timeline strip
+    const y = 960, x0 = 80, W = 1760;
+    ctx.fillStyle = C.gray; ctx.fillRect(x0, y, W, 44);
+    (tr ? tr.lines : []).forEach((l) => {
+      const a = x0 + (l.start / DUR) * W, b = x0 + (l.end / DUR) * W;
+      ctx.fillStyle = C.red; ctx.fillRect(a, y + 6, Math.max(4, b - a), 32);
+      l.phrases.forEach((p) => { ctx.fillStyle = C.white; ctx.fillRect(x0 + (p.start / DUR) * W, y + 6, 3, 32); });
+    });
+    ctx.fillStyle = C.white; ctx.fillRect(x0 + (t / DUR) * W - 2, y - 14, 4, 72);
+    ctx.font = MV.text.font(40, MV.FONTS.latinCond, 400); ctx.fillStyle = C.white;
+    ctx.fillText(MV.fmtTime(t), x0, y - 26);
+    ctx.fillText('PREVIEW · ' + (dev.applied.length ? 'APPLIED ×' + dev.applied.length : 'PRESET TIMING'), 80, 90);
+  }
+  requestAnimationFrame(frame);
+  dev.ready = true;
+})();
+</script>
+</body>
+</html>
