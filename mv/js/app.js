@@ -238,6 +238,7 @@
       'debugBox', 'fileAudio', 'fileLyrics',
     ].forEach((id) => (D[id] = $(id)));
     D.panels = { lyrics: D.panelLyrics, settings: D.panelSettings, export: D.panelExport };
+    D.menuEmblem = document.querySelector('.menu-emblem');
   }
 
   /* ------------------------------------------------------------------ */
@@ -680,9 +681,11 @@
       try {
         const r = S.stage.renderFrame(t);
         S.lastRender = r;
-        if (r && r.state && r.state.env && S.menuOpen && D.menu) {
+        if (r && r.state && r.state.env && S.menuOpen && D.menuEmblem) {
+          // Emblem bumps on the beat (scoped to one element: no menu-wide style recalc).
           const b = r.state.env.beat;
-          D.menu.style.setProperty('--beat', b ? clamp(fin(b.pulse, 0)).toFixed(3) : '0');
+          const v = b ? clamp(fin(b.pulse, 0)).toFixed(2) : '0';
+          if (v !== S.beatVar) D.menuEmblem.style.setProperty('--beat', (S.beatVar = v));
         }
         return r;
       } catch (e) {
@@ -1018,11 +1021,13 @@
     }
     // Menu labels.
     const noAudio = !S.audio;
+    document.body.classList.toggle('no-audio', noAudio);
     if (D.miPlayZh) {
-      const resume = !noAudio && S.hasPlayed && !(S.engine && S.engine.playing) && S.engine.currentTime > 0.05;
       const playing = !noAudio && S.engine && S.engine.playing;
-      D.miPlayZh.textContent = playing ? '返回' : resume ? '继续' : '播放';
-      D.miPlayEn.textContent = playing ? 'RESUME' : resume ? 'CONTINUE' : 'PLAY';
+      const atEnd = !noAudio && !playing && S.engine.currentTime >= S.engine.duration - 0.05;
+      const resume = !noAudio && S.hasPlayed && !playing && !atEnd && S.engine.currentTime > 0.05;
+      D.miPlayZh.textContent = playing ? '返回' : atEnd ? '重播' : resume ? '继续' : '播放';
+      D.miPlayEn.textContent = playing ? 'RESUME' : atEnd ? 'REPLAY' : resume ? 'CONTINUE' : 'PLAY';
     }
     if (D.menuList) {
       const mark = (act, dis) => {
@@ -2353,6 +2358,13 @@
       updatePlayButton();
       updateStatus();
       wake();
+      // Back to the menu after the end card had a moment on screen.
+      if (!TEST) {
+        clearTimeout(S.endTimer);
+        S.endTimer = setTimeout(() => {
+          if (S.engine && !S.engine.playing && !S.menuOpen && !S.panel && !(S.sync && S.sync.isOpen) && !S.exporter) openMenu(false);
+        }, 1800);
+      }
     });
     S.engine.on('blocked', () => {
       if (D.bigPlay && S.engine.playing) D.bigPlay.hidden = false;

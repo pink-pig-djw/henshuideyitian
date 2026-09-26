@@ -514,6 +514,30 @@ body.menu-open .menu-keys { opacity: 0.92; }
 .menu-keys span { white-space: nowrap; }
 .menu-keys kbd { margin-right: 4px; }
 
+.menu-back {
+  position: absolute;
+  z-index: 3;
+  top: max(18px, env(safe-area-inset-top));
+  right: max(20px, env(safe-area-inset-right));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px 7px 14px;
+  border: 0;
+  color: var(--white);
+  background: var(--ink);
+  transform: skewX(-12deg) translateY(-80px);
+  box-shadow: 4px 4px 0 var(--red);
+  opacity: 0;
+  transition: transform 0.24s var(--ease-back) 0.12s, opacity 0.1s linear 0.12s, background 0.08s;
+}
+body.menu-open .menu-back { transform: skewX(-12deg); opacity: 1; }
+.menu-back span { font: 900 14px/1 var(--f-ui); }
+.menu-back b { font: 400 16px/1 var(--f-latin); letter-spacing: 0.1em; color: var(--red-hot); }
+.menu-back svg { width: 18px; height: 18px; }
+.menu-back:hover, .menu-back:focus-visible { color: var(--ink); background: var(--white); outline: none; transform: skewX(-12deg) rotate(-3deg) scale(1.06); }
+.menu-back:hover b, .menu-back:focus-visible b { color: var(--red); }
+
 /* ------------------------------------------------------------------ */
 /* Panels (lyrics / settings / export)                                 */
 /* ------------------------------------------------------------------ */
