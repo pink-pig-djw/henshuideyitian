@@ -1194,7 +1194,7 @@ body.is-test *, body.is-test *::before, body.is-test *::after {
   .menu-head { gap: 12px; }
   .menu-emblem { width: 58px; height: 58px; }
   .menu-title { font-size: clamp(26px, 8.5vh, 40px); -webkit-text-stroke: 1.5px var(--ink); text-shadow: 4px 4px 0 var(--ink); }
-  .menu-latin { margin: 4px 0 0 4px; padding: 2px 9px 1px; font-size: 13px; box-shadow: 3px 3px 0 var(--white); }
+  .menu-latin { margin: 4px 0 0 4px; padding: 2px 9px 1px; font-size: 13px; white-space: nowrap; box-shadow: 3px 3px 0 var(--white); }
   .menu-credit { margin: 6px 0 0 12px; padding: 2px 8px 3px; font-size: 10px; letter-spacing: 0; white-space: nowrap; }
   .menu-list { align-self: start; gap: 5px; padding: 4px 0 0 4px; }
   .menu-list li { margin-left: calc(var(--i) * 10px); }
@@ -1250,4 +1250,9 @@ body.is-test *, body.is-test *::before, body.is-test *::after {
   #lyricsText { height: 34vh; min-height: 96px; }
   .banner { bottom: calc(var(--bar-h) + 12px + env(safe-area-inset-bottom)); }
   .toasts { bottom: calc(var(--bar-h) + 12px + env(safe-area-inset-bottom)); }
+}
+@media (max-height: 560px) and (min-width: 560px) and (max-width: 680px) {
+  .menu-emblem { width: 46px; height: 46px; }
+  .menu-head { gap: 9px; }
+  .menu-latin { letter-spacing: 0.08em; }
 }
