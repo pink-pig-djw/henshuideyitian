@@ -464,9 +464,13 @@
    *      with more than 800 characters with the full sliced stylesheet;
    *   3. wait for the stylesheet's load event, then document.fonts.load() each
    *      family with that text;
-   *   4. resolve a report from FontFace.status. Never rejects; after
+   *   4. resolve a report from the FontFace.status of the request's own subset
+   *      faces (recognised by their exact unicode-range; else the load result
+   *      decides), so an unrelated failed face does not count. Never rejects; after
    *      `timeoutMs` (default 10 s) it resolves with what is known by then
-   *      (unfinished families are listed in `failed` and `pending`).
+   *      (unfinished families are listed in `failed` and `pending`). A failed
+   *      stylesheet / failed faces are requested again by calls made at least
+   *      RETRY_MS later (earlier calls just report the failure again).
    *
    * The subset @font-face rules come after index.html's static stylesheet
    * (which only carries the faces the HTML UI uses), so they win for their
@@ -494,7 +498,9 @@
     s += '作詞曲編歌唄词';
     return s;
   })();
-  const fontEntries = []; // { chars: Set, key, links: [HTMLLinkElement], ready: Promise<boolean>, state }
+  // { chars: Set, key, links: [HTMLLinkElement], ready: Promise<boolean>,
+  //   state: 'loading' | 'ok' | 'partial' (some faces failed) | 'stale' | 'error' }
+  const fontEntries = [];
 
   /** Sorted unique drawable characters of `str` (every whitespace → ' '). */
   function fontChars(str) {
@@ -536,9 +542,54 @@
     }
     return urls;
   }
+  /** Does a FontFace unicode-range ('U+20-7E, U+3001') list exactly the code points of `set`? */
+  function fontRangeIs(ur, set) {
+    const rs = [];
+    let n = 0;
+    for (const part of String(ur || '').split(',')) {
+      const p = part.trim().replace(/^u\+/i, '');
+      if (!p) continue;
+      const m = /^([0-9a-f?]+)(?:-([0-9a-f]+))?$/i.exec(p);
+      if (!m) return false;
+      const a = parseInt(m[1].replace(/\?/g, '0'), 16);
+      const b = m[2] ? parseInt(m[2], 16) : parseInt(m[1].replace(/\?/g, 'f'), 16);
+      n += b - a + 1;
+      if (!(n <= set.size)) return false;
+      rs.push([a, b]);
+    }
+    if (n !== set.size) return false;
+    for (const [a, b] of rs) for (let c = a; c <= b; c++) if (!set.has(c)) return false;
+    return true;
+  }
+  /** FontFace.weight ('900', 'normal', '100 900') accepts weight w? */
+  function fontWeightIs(fw, w) {
+    const s = String(fw || '').trim();
+    if (s === 'normal') return w === 400;
+    if (s === 'bold') return w === 700;
+    const ws = s.split(/\s+/).map(Number);
+    return ws.length > 1 ? w >= ws[0] && w <= ws[1] : ws[0] === w;
+  }
+  /**
+   * The FontFaces this request's stylesheet created for (fam, w): Google gives
+   * each subset face a unicode-range of exactly the requested characters.
+   * Empty when they cannot be told apart (then document.fonts.load decides).
+   */
+  function fontOwnFaces(entry, fam, w) {
+    const out = [];
+    try {
+      document.fonts.forEach((face) => {
+        if (String(face.family).replace(/^["']|["']$/g, '') !== fam || !fontWeightIs(face.weight, w)) return;
+        if (entry.chunks.some((set) => fontRangeIs(face.unicodeRange, set))) out.push(face);
+      });
+    } catch (e) {
+      return [];
+    }
+    return out;
+  }
   /** Inject the subset stylesheet(s) for `chars`; entry.ready → true when all loaded. */
   function fontInject(chars, key) {
-    const entry = { chars: new Set(chars), key, links: [], state: 'loading', ready: null };
+    const entry = { chars: new Set(chars), key, links: [], state: 'loading', ready: null, chunks: [] };
+    for (let i = 0; i < chars.length; i += MAX_TEXT) entry.chunks.push(new Set(chars.slice(i, i + MAX_TEXT).map((c) => c.codePointAt(0))));
     const head = document.head || document.documentElement;
     const jobs = fontURLs(chars).map(
       (href) =>
@@ -575,10 +626,42 @@
   function fontFind(chars, key) {
     let hit = null;
     for (const e of fontEntries) {
+      if (e.state === 'stale') continue; // to be re-requested (see fontMarkPartial)
       if (e.key === key) return e; // includes a recent failure (see fontInject)
       if (!hit && e.state !== 'error' && chars.every((c) => e.chars.has(c))) hit = e;
     }
     return hit;
+  }
+  /**
+   * Faces that failed stay in FontFace 'error' state for good, so a partly
+   * failed stylesheet turns 'stale' after RETRY_MS: the next call for those
+   * characters injects it again (new FontFace objects, new requests).
+   */
+  function fontMarkPartial(entry) {
+    if (entry.state !== 'ok') return;
+    entry.state = 'partial';
+    setTimeout(() => {
+      if (entry.state === 'partial') entry.state = 'stale';
+    }, RETRY_MS);
+  }
+  /**
+   * Once a fresh stylesheet has loaded, drop the stale ones it covers — before
+   * document.fonts.load(), which would otherwise also match their errored faces.
+   */
+  function fontDropStale(entry) {
+    for (const e of fontEntries.slice()) {
+      if (e === entry || e.state !== 'stale') continue;
+      let covered = true;
+      for (const c of e.chars) {
+        if (!entry.chars.has(c)) {
+          covered = false;
+          break;
+        }
+      }
+      if (!covered) continue;
+      e.links.forEach((l) => l.remove());
+      fontEntries.splice(fontEntries.indexOf(e), 1);
+    }
   }
 
   MV.fonts = {
@@ -593,6 +676,8 @@
     urls: (sample) => fontURLs(fontChars(String(sample == null ? '' : sample) + BASE_TEXT)),
     /** Number of subset stylesheets injected so far (successful or pending). */
     linkCount: () => fontEntries.reduce((n, e) => n + (e.state === 'error' ? 0 : e.links.length), 0),
+    /** Debug view of the requests: [{ chars, links, state }]. */
+    entries: () => fontEntries.map((e) => ({ chars: e.chars.size, links: e.links.length, state: e.state })),
 
     /**
      * Load the web-font glyphs for `sample` (see the section comment above).
@@ -631,19 +716,37 @@
             fams.forEach((f) => (f.status = 'failed'));
             return report(false, 'stylesheet');
           }
+          fontDropStale(entry);
           return Promise.all(
             fams.map((f) =>
-              document.fonts.load(`${f.w} 64px "${f.fam}"`, text).then(
-                (faces) => {
-                  const list = Array.from(faces || []);
-                  f.status = list.length && list.every((x) => x.status === 'loaded') ? 'loaded' : 'failed';
-                },
-                () => {
-                  f.status = 'failed';
-                }
-              )
+              // Loads every face matching the family + text (this request's subset
+              // among them). The status comes from the subset faces themselves, so an
+              // unrelated failed face (e.g. a UI slice of the same family) does not
+              // count; if they cannot be identified, the load result decides.
+              document.fonts
+                .load(`${f.w} 64px "${f.fam}"`, text)
+                .then(
+                  (faces) => Array.from(faces || []).length > 0 && Array.from(faces).every((x) => x.status === 'loaded'),
+                  () => false
+                )
+                .then((allOk) => {
+                  const own = fontOwnFaces(entry, f.fam, f.w);
+                  if (!own.length) return allOk;
+                  return Promise.all(
+                    own.map((face) => {
+                      if (face.status === 'unloaded') face.load().catch(() => null);
+                      return face.loaded.then(() => true, () => false);
+                    })
+                  ).then((oks) => oks.every(Boolean));
+                })
+                .then((ok) => {
+                  f.status = ok ? 'loaded' : 'failed';
+                })
             )
-          ).then(() => report(false));
+          ).then(() => {
+            if (fams.some((f) => f.status !== 'loaded')) fontMarkPartial(entry);
+            return report(false);
+          });
         });
         return new Promise((resolve) => {
           let settled = false;

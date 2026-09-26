@@ -795,12 +795,18 @@
       }, 21000);
     }
   }
-  /** Faces that finish after an ensure() timeout still refresh the lyric layouts. */
+  /**
+   * Faces that finish after an ensure() timeout (slow network) still refresh
+   * the lyric layouts. A completed ensure() already invalidated them, so the
+   * hook stays idle then (no extra re-render per UI font slice).
+   */
   function bindFontEvents() {
     try {
       if (!document.fonts || !document.fonts.addEventListener) return;
       let tm = 0;
       document.fonts.addEventListener('loadingdone', () => {
+        const rep = S.fontReport;
+        if (!rep || !(rep.timedOut || (rep.failed && rep.failed.length))) return;
         clearTimeout(tm);
         tm = setTimeout(() => {
           if (S.stage) S.stage.invalidateLayouts();
@@ -1641,7 +1647,7 @@
    * opts: { source: 'paste'|'file'|'url'|'assets'|'storage'|'api', persist: true }
    */
   function setLyricsText(text, opts = {}) {
-    if (exportBusy('\u6B4C\u8BCD')) return lyricsState();
+    if (exportBusy('歌词')) return lyricsState();
     text = String(text == null ? '' : text).replace(/^\uFEFF/, '');
     const changed = text !== S.lyricsText;
     S.lyricsText = text;

@@ -63,9 +63,9 @@ js/director.js               MV.Director — cue timeline, evaluate(t) → Frame
 js/stage.js                  MV.Stage — buffers, compositing, renderFrame(t)
 js/export.js                 MV.Exporter — WebCodecs + mp4-muxer, MediaRecorder fallback
 js/sync.js                   MV.SyncEditor — tap-to-sync lyric timing editor
-js/app.js                    MV.app — UI wiring, auto-load, keyboard, test API
+js/app.js                    MV.app — UI wiring, auto-load, keyboard, export lock, test API
 css/app.css
-tools/*.mjs|*.sh             dev harness (Playwright snapshots, perf, export test)
+tools/*.cjs|*.html           dev harness (Playwright snapshots, perf, export test)
 assets/                      user's own song/lyrics (git-ignored)
 out/                         harness output (git-ignored)
 ```
@@ -80,7 +80,8 @@ out/                         harness output (git-ignored)
   id: 'hoshi-to-bokura-to',
   meta: { title, titleLatin, artist, lyricist, composer, source, note },
   match: { duration: 221.27, tolerance: 2.0 },      // seconds
-  bpm: 99.38, beatsPerBar: 4,
+  bpm: 99.99, beatsPerBar: 4,
+  downbeatPhase: 3,                                  // optional (default 0): beats[downbeatPhase::beatsPerBar] start bars
   beats: [0.72, 1.324, ...],                         // seconds, preset timeline
   sections: [{ kind, name, start, end, intensity, scenes:[...], switchBars?, switchOn?:'phrase', credits?, endCard? }],
   lines: [{ n, key, len, style?, phrases?:[{at, t}], end?, skip? }],
@@ -88,6 +89,12 @@ out/                         harness output (git-ignored)
   refEnvelope: { hop: 0.05, data: '<base64 uint8>' } // novelty curve for offset alignment
 }
 ```
+* `downbeatPhase` = index (mod `beatsPerBar`) of the preset beat that starts a
+  bar: the true downbeats are `beats[downbeatPhase], beats[downbeatPhase + 4], …`
+  (the first listed beats are pickup beats). Section boundaries sit on true
+  downbeats. `MV.Analysis.applyPreset` re-expresses it relative to the clipped /
+  shifted beat list (`features.downbeatPhase`); the Director, Lyrics (auto
+  timing) and the app's synthetic attract features honour it.
 * `lines[i].key` = `MV.lyricKey(lineText)`; `len` = code points of
   `MV.canonDisplay(lineText)`; `phrases[k].at` = code-point offset into that
   display string where timed chunk k starts; `t` = absolute seconds.
@@ -107,6 +114,7 @@ out/                         harness output (git-ignored)
   onsets: [{ t, s }],                        // s = strength 0..1
   kicks: [t],                                // low-band onsets
   bpm, beatsPerBar: 4, beats: [t], downbeats: [t],
+  downbeatPhase,                             // index (mod beatsPerBar) of the first bar-starting beat in `beats`
   sections: [{ kind, name, start, end, intensity, energy, scenes?, switchBars?, switchOn?, credits?, endCard? }],
   novelty: Float32Array,                     // refEnvelope-compatible curve (hop 0.05 s)
   source: 'computed' | 'preset',
@@ -299,4 +307,76 @@ Opus fallback, backpressure on `encodeQueueSize`. Fallback: realtime
 
 ### 3.11 `MV.SyncEditor` (`js/sync.js`) and `MV.app` (`js/app.js`)
 See those files' headers. Test API exposed as
-`window.MV.app = { loadAudioURL, setLyricsText, renderAt, play, pause, seek, getState, exportVideo }`.
+`window.MV.app = { loadAudioURL, setLyricsText, renderAt, play, pause, seek, getState, exportVideo }`
+(`getState().fonts` = last font report summary, `getState().locked` = export lock).
+
+App rules worth knowing when touching other modules:
+* **Export isolation.** `exportVideo` builds the exporter its own Director from
+  a deep copy of the track (`MV.Lyrics.clone`) plus the current features /
+  preset / options, and locks lyric text, offset, HUD / credits, the sync
+  editor and audio loading until the export ends (`body.is-exporting`,
+  `[data-lock]` notes). Preview-only settings (quality, volume, debug) stay live.
+* **Sandboxed hosting** (e.g. a claude.ai artifact iframe: opaque origin, CSP,
+  downloads blocked). No code path may use `alert` / `confirm` / `prompt`;
+  every `localStorage` / IndexedDB access is wrapped (the app still runs, it
+  just does not remember); every download link (video, LRC) is followed by a
+  note telling the user to export from a local copy in Chrome / Edge; the
+  `assets/` probe is skipped in framed or opaque-origin pages.
+
+---
+
+## 4. Web fonts
+
+Two layers, so the UI paints fast and the canvas never waits on hundreds of
+requests:
+
+1. **Static (index.html)** — only the faces the HTML UI uses: `Anton` +
+   `Noto Sans SC` 500 / 900 (full stylesheet: unicode-range slices, only the
+   slices the UI text needs are fetched), plus an exact-text subset of
+   `Dela Gothic One` / `Archivo Black` / `Permanent Marker` for the menu title
+   and the ransom "MV".
+2. **On demand (`MV.fonts.ensure`, js/core.js)** — the 17 canvas faces
+   (`MV.FONTS.webFamilies`) as exact-character subsets.
+
+```js
+MV.fonts.ensure(sample, timeoutMs = 10000) → Promise<report>   // never rejects
+report = { loaded: ['Anton 400', …], failed: [...], pending: [...], timedOut, chars, links, error? }
+MV.fonts.last          // last completed report
+MV.fonts.chars(sample) / MV.fonts.urls(sample) / MV.fonts.linkCount() / MV.fonts.entries()
+```
+* chars = unique code points of `sample` + `MV.fonts.BASE` (printable ASCII,
+  typographic / CJK punctuation, credit labels), sorted; whitespace → space.
+* Once per distinct char set (a set already covered by an earlier request is
+  reused, e.g. after clearing lyrics) a
+  `<link rel=stylesheet href="https://fonts.googleapis.com/css2?family=…&text=<chars>&display=swap">`
+  is appended to `<head>`. Google answers with one `@font-face` per family
+  whose `unicode-range` is exactly the requested characters. Requests carry at
+  most 700 characters (Google silently falls back to the full sliced sheet
+  above 800), larger sets are split over several links.
+* After the stylesheet's `load` event, `document.fonts.load('<w> 64px "<family>"', text)`
+  runs for every family; a family counts as loaded when this request's own
+  subset faces (recognised by their exact `unicode-range`) reach
+  `FontFace.status === 'loaded'` — a failed unrelated face of the same family
+  (e.g. a UI slice) does not count; if the subset faces cannot be recognised,
+  the `document.fonts.load` result decides. After `timeoutMs` it resolves with
+  what is known (unfinished families are in `failed` and `pending`).
+* Retries: a failed stylesheet is removed, and a stylesheet whose faces partly
+  failed turns stale; calls made ≥ 20 s later request it again (the app retries
+  twice, 21 s apart), earlier calls just report the failure again (no console
+  error per call while offline). Stale links are removed once the fresh
+  stylesheet has loaded, before `document.fonts.load` runs.
+* The subset rules are appended after the static sheet, so they are tried
+  first for their characters (CSS Fonts: the last defined face wins where
+  unicode-ranges overlap); anything else falls back as usual.
+* No fetch / XHR: works from `file://` (network permitting) and in sandboxed
+  iframes whose CSP allows `fonts.googleapis.com` stylesheets and
+  `fonts.gstatic.com` fonts.
+
+Callers: the app calls `ensure(<every lyric line + title + credits (+ LyricFX.fontSample)>)`
+whenever the lyrics change (boot restores stored lyrics *before* the stage is
+prepared, so a returning visitor needs a single stylesheet), then
+`stage.invalidateLayouts()`; faces that arrive after a timeout also invalidate
+the layouts (`document.fonts` `loadingdone`). `stage.prepare({ fontTimeout })`
+(preview and the exporter's own stage) calls `ensure` with the director's
+`fontText()` — normally covered by the app's request. LyricFX clears its glyph
+metric cache on `loadingdone`.
