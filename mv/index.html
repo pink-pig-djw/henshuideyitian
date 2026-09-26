@@ -10,7 +10,11 @@
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230A0A0A'/%3E%3Cpath d='M32 7L38.5 25.1L57.7 25.7L42.5 37.4L47.9 55.8L32 45L16.1 55.8L21.5 37.4L6.3 25.7L25.5 25.1Z' fill='%23E60012' stroke='%23FFFFFF' stroke-width='3' stroke-linejoin='round'/%3E%3Cpath d='M5 53L55 9L60 14L10 58Z' fill='%23FFFFFF' stroke='%230A0A0A' stroke-width='2.5' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&family=Archivo+Black&family=Bebas+Neue&family=Dela+Gothic+One&family=DotGothic16&family=Kaisei+Decol:wght@700&family=Noto+Sans+JP:wght@500;900&family=Noto+Serif+JP:wght@700;900&family=Noto+Sans+SC:wght@500;900&family=Potta+One&family=Rampart+One&family=Reggae+One&family=RocknRoll+One&family=Shippori+Mincho+B1:wght@800&family=Zen+Antique&family=Permanent+Marker&display=swap">
+<!-- Web fonts for the HTML UI only: Chinese UI text (2 weights) + condensed Latin labels.
+     The 17 canvas faces are requested on demand by MV.fonts.ensure() as exact-text subsets. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&family=Noto+Sans+SC:wght@500;900&display=swap">
+<!-- Menu title (星と僕ら) and the ransom-note "MV": tiny exact-text subsets. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Dela+Gothic+One&family=Permanent+Marker&text=%E6%98%9F%E3%81%A8%E5%83%95%E3%82%89MV&display=swap">
 <link rel="stylesheet" href="css/app.css">
 <link rel="stylesheet" href="css/sync.css">
 </head>
@@ -87,6 +91,7 @@
   <section class="panel" id="panelLyrics" role="dialog" aria-modal="false" aria-labelledby="plTitle" hidden>
     <header class="panel-head"><h2 id="plTitle">歌词 <span>LYRICS</span></h2><button type="button" class="panel-close" data-close aria-label="关闭 Close"><svg><use href="#i-close"/></svg></button></header>
     <div class="panel-body">
+      <p class="lock-note" data-lock hidden>导出进行中：歌词暂时锁定，导出完成或取消后恢复。<span class="en">Locked while exporting.</span></p>
       <p class="panel-lead">粘贴歌词（纯文本或 LRC）。标题、署名行会被自动忽略；按预设自动对时。<br><span class="en">Paste plain text or LRC — timing comes from the song preset.</span></p>
       <textarea id="lyricsText" spellcheck="false" autocomplete="off" rows="12" placeholder="在此粘贴歌词…&#10;例：夜明けの駅で 君を待つ&#10;Paste lyrics here"></textarea>
       <div class="panel-actions">
@@ -104,6 +109,7 @@
   <section class="panel" id="panelSettings" role="dialog" aria-modal="false" aria-labelledby="psTitle" hidden>
     <header class="panel-head"><h2 id="psTitle">设置 <span>SETTINGS</span></h2><button type="button" class="panel-close" data-close aria-label="关闭 Close"><svg><use href="#i-close"/></svg></button></header>
     <div class="panel-body settings">
+      <p class="lock-note" data-lock hidden>导出进行中：信息条、制作人员字幕和歌词偏移暂时锁定，导出完成或取消后恢复。<span class="en">Locked while exporting.</span></p>
       <div class="set-row">
         <span class="set-label">信息条 <small>HUD</small></span>
         <label class="switch"><input type="checkbox" id="setHud" checked><i></i></label>

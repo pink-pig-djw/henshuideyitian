@@ -3,17 +3,25 @@
  * Playwright harness for js/render/scenes.js (via tools/dev-scenes.html).
  *
  *   NODE_PATH=/opt/node22/lib/node_modules node mv/tools/shot-scenes.cjs [--port=8703] [--only=a,b] [--no-full] [--no-perf] [--frames=120] [--gpu-canvas] [--story]
+ *     [--no-flags] [--page=<file path or URL of a dev-scenes.html, e.g. an older copy to compare>] [--out=<dir>]
  *
  * Writes to mv/out/scenes/:
  *   sheet-<scene>.png      3×2 contact sheet (intensities 0.25 … 1.0, variants, beat phases)
  *   strip-<scene>.png      6 frames around a downbeat (−0.12 … +0.62 s) at intensity 0.9
  *   full/<scene>-<tag>.png full-resolution 1920×1080 frames (low / mid / high-on-downbeat)
- *   perf.json              avg / p95 ms per frame over N frames (chorus-like and verse-like settings)
+ *   perf.json              avg / p95 ms per frame over N frames (chorus-like and verse-like settings),
+ *                          identity transform and a Stage-like camera (zoom 1.02, slight rotation —
+ *                          the Stage always draws scenes with overscan zoom, so sprites are filtered)
+ *   mem.json               prepared cache memory per scene (MV.sceneStats + unique canvases)
  *   story-<n>.png          (--story) every cue of the preset section map, env from MV.Analysis
  *                          on the local assets/song.mp3 (git-ignored; skipped if absent)
  * and runs checks: every scene registered, opaque with camera zoom-out/rotation,
  * deterministic (same pixels for the same t after unrelated renders), no
- * Math.random / Date.now / performance.now calls while drawing, no page errors.
+ * Math.random / Date.now / performance.now calls while drawing, no page errors,
+ * prepared sprite memory < 70 MB, and no Rising-Sun-like composition: every
+ * scene × variant 0–5 × several intensities / beat phases is scanned by
+ * devScenes.flagScan (radial red/light wedges around a centre; see
+ * dev-scenes.html) and must score < 6 (the old sun-ray designs scored 9–24).
  * Starts `python3 -m http.server <port>` on mv/ if nothing answers there.
  */
 'use strict';
@@ -34,7 +42,9 @@ const arg = (k, d) => {
 const ROOT = path.resolve(__dirname, '..');
 const PORT = +arg('port', process.env.PORT || 8703);
 const BASE = 'http://localhost:' + PORT;
-const OUT = path.join(ROOT, 'out', 'scenes');
+const PAGE = arg('page', '') ? String(arg('page')) : '';
+const PAGE_URL = !PAGE ? BASE + '/tools/dev-scenes.html?ui=0' : /^[a-z]+:\/\//.test(PAGE) ? PAGE : 'file://' + path.resolve(PAGE) + '?ui=0';
+const OUT = arg('out', '') ? path.resolve(String(arg('out'))) : path.join(ROOT, 'out', 'scenes');
 const FULL = path.join(OUT, 'full');
 fs.mkdirSync(FULL, { recursive: true });
 const ONLY = arg('only', '') ? String(arg('only')).split(',') : null;
@@ -65,27 +75,43 @@ function ping() {
     });
   });
 }
-// Downbeat k of the preset grid (first beat 0.72 s, 99.38 BPM) + a small offset.
-const BAR = (4 * 60) / 99.38;
-const down = (k, d = 0.04) => +(0.72 + k * BAR + d).toFixed(3);
-
-const SHEET = [
-  { t: 14.3, i: 0.25, v: 0, seed: 7 },
-  { t: 33.3, i: 0.35, v: 1, seed: 11 },
-  { t: down(17, 0.1), i: 0.6, v: 2, seed: 3 },
-  { t: down(20, 0.03), i: 0.85, v: 0, seed: 5 },
-  { t: down(60, 0.3), i: 0.95, v: 1, seed: 9 },
-  { t: down(80, 0.02), i: 1.0, v: 2, seed: 13 },
-];
-const FULLSHOTS = [
-  { tag: 'low', t: 20.2, i: 0.25, v: 0, seed: 7 },
-  { tag: 'mid', t: 41.5, i: 0.6, v: 1, seed: 4 },
-  { tag: 'high', t: down(21, 0.05), i: 0.95, v: 0, seed: 5 },
-];
+// Downbeat k of the preset grid (bpm and the first TRUE downbeat,
+// beats[downbeatPhase], read from the page) + a small offset.
+let GRID = { bar: (4 * 60) / 99.99, down0: 2.531 };
+const down = (k, d = 0.04) => +(GRID.down0 + k * GRID.bar + d).toFixed(3);
+let SHEET = [], FULLSHOTS = [];
+function makeShots() {
+  SHEET = [
+    { t: 14.3, i: 0.25, v: 0, seed: 7 },
+    { t: 33.3, i: 0.35, v: 1, seed: 11 },
+    { t: down(17, 0.1), i: 0.6, v: 2, seed: 3 },
+    { t: down(20, 0.03), i: 0.85, v: 0, seed: 5 },
+    { t: down(60, 0.3), i: 0.95, v: 1, seed: 9 },
+    { t: down(80, 0.02), i: 1.0, v: 2, seed: 13 },
+  ];
+  FULLSHOTS = [
+    { tag: 'low', t: 20.2, i: 0.25, v: 0, seed: 7 },
+    { tag: 'mid', t: 41.5, i: 0.6, v: 1, seed: 4 },
+    { tag: 'high', t: down(21, 0.05), i: 0.95, v: 0, seed: 5 },
+  ];
+}
+// Rising-Sun check: every variant (the Director uses 0–5) at calm / mid / loud
+// intensity, on and between downbeats, two seeds.
+function flagCells(name) {
+  const cells = [];
+  for (let v = 0; v < 6; v++) {
+    for (const i of [0.25, 0.55, 0.95]) {
+      for (const [k, d] of [[12, 0.03], [37, 0.9]]) cells.push({ scene: name, t: down(k + v, d), i, v, seed: 3 + v * 7 + Math.round(i * 10) + k });
+    }
+  }
+  return cells;
+}
+const FLAG_MAX = 6;
+const STAGE_CAM = { zoom: 1.02, x: 3, y: -2, rot: 0.004 };
 
 (async () => {
   let server = null;
-  if (!(await ping())) {
+  if (!PAGE && !(await ping())) {
     server = spawn('python3', ['-m', 'http.server', String(PORT), '--directory', ROOT], { stdio: 'ignore' });
     for (let i = 0; i < 50 && !(await ping()); i++) await sleep(100);
   }
@@ -97,14 +123,18 @@ const FULLSHOTS = [
     args: ['--enable-unsafe-swiftshader', '--use-angle=swiftshader', '--autoplay-policy=no-user-gesture-required']
       .concat(arg('gpu-canvas', false) ? [] : ['--disable-accelerated-2d-canvas']),
   });
-  const summary = { perf: {}, prepMs: {} };
+  const summary = { perf: {}, prepMs: {}, flags: {} };
   try {
-    const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage();
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true })).newPage();
     const errors = [];
     page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
     page.on('console', (m) => m.type() === 'error' && !/Failed to load resource/.test(m.text()) && errors.push('console: ' + m.text()));
-    await page.goto(BASE + '/tools/dev-scenes.html?ui=0');
+    await page.goto(PAGE_URL);
     await page.waitForFunction(() => window.devScenes && window.devScenes.ready);
+    const g = await page.evaluate(() => window.devScenes.grid || null);
+    if (g) GRID = g;
+    makeShots();
+    console.log('beat grid: bar ' + GRID.bar.toFixed(4) + ' s, first downbeat ' + GRID.down0 + ' s');
 
     const names = await page.evaluate(() => window.devScenes.names);
     check('all 10 scenes registered', SCENES.every((n) => names.includes(n)), names.join(','));
@@ -162,6 +192,31 @@ const FULLSHOTS = [
       check(name + ': deterministic (same t → same pixels after unrelated renders)', det.h1 === det.h2, det.h1 + ' vs ' + det.h2);
       check(name + ': animates (t+1.1 s differs)', det.h1 !== det.h3);
       check(name + ': no Math.random/Date.now/performance.now while drawing', det.calls.random + det.calls.now + det.calls.perf === 0, JSON.stringify(det.calls));
+      // cultural check: no radial red/light wedges (Rising-Sun-like) anywhere
+      if (!arg('no-flags', false)) {
+        const has = await page.evaluate(() => typeof window.devScenes.flagScan === 'function');
+        if (has) {
+          let worst = { score: -1 };
+          for (const cell of flagCells(name)) {
+            const r = await page.evaluate((o) => window.devScenes.flagScan(o), cell);
+            if (r.score > worst.score) worst = Object.assign({ cell }, r);
+          }
+          summary.flags[name] = worst;
+          check(name + ': no Rising-Sun-like radial red/light wedges (36 frames, variants 0–5)', worst.score < FLAG_MAX,
+            'worst score ' + worst.score + ' (rays ' + worst.rays + ', sectors ' + worst.sectors + ') at t=' + worst.cell.t + ' I=' + worst.cell.i + ' v=' + worst.cell.v + ' centre ' + worst.x + ',' + worst.y);
+        } else console.log('SKIP flag scan: page has no devScenes.flagScan');
+      }
+    }
+    if (Object.keys(summary.flags).length) fs.writeFileSync(path.join(OUT, 'flags.json'), JSON.stringify(summary.flags, null, 2));
+
+    // prepared cache memory
+    const memInfo = await page.evaluate(() => (window.devScenes.mem ? window.devScenes.mem() : null));
+    if (memInfo) {
+      const MB = (b) => +(b / 1048576).toFixed(1);
+      console.log('memory: unique sprite canvases ' + MB(memInfo.uniqueBytes) + ' MB in ' + memInfo.canvases + ' canvases');
+      if (memInfo.stats) console.log('memory by builder (MB): ' + JSON.stringify(Object.fromEntries(Object.entries(memInfo.stats.bytes).map(([k, b]) => [k, MB(b)]))) + '  vector segments: ' + JSON.stringify(memInfo.stats.segs));
+      fs.writeFileSync(path.join(OUT, 'mem.json'), JSON.stringify(memInfo, null, 2));
+      check('prepared scene sprites < 70 MB', memInfo.uniqueBytes < 70 * 1048576, MB(memInfo.uniqueBytes) + ' MB');
     }
 
     // whole-song storyboard: every cue of the preset section map with a real env
@@ -196,8 +251,11 @@ const FULLSHOTS = [
       for (const name of todo) {
         const hi = await page.evaluate((o) => window.devScenes.perf(o), { scene: name, t: 49.0, i: 0.9, v: 0, seed: 5, frames: FRAMES });
         const lo = await page.evaluate((o) => window.devScenes.perf(o), { scene: name, t: 15.0, i: 0.25, v: 1, seed: 7, frames: FRAMES });
-        summary.perf[name] = { high: +hi.avg.toFixed(2), highP95: +hi.p95.toFixed(2), low: +lo.avg.toFixed(2), lowP95: +lo.p95.toFixed(2), prepMs: +hi.prepMs.toFixed(0) };
-        console.log(`perf ${name.padEnd(11)} avg ${hi.avg.toFixed(2)} ms (I=.9, p95 ${hi.p95.toFixed(2)}) | avg ${lo.avg.toFixed(2)} ms (I=.25) | prepare ${hi.prepMs.toFixed(0)} ms`);
+        const n2 = Math.max(20, Math.round(FRAMES / 3));
+        const hiC = await page.evaluate((o) => window.devScenes.perf(o), { scene: name, t: 49.0, i: 0.9, v: 0, seed: 5, frames: n2, cam: STAGE_CAM });
+        const loC = await page.evaluate((o) => window.devScenes.perf(o), { scene: name, t: 15.0, i: 0.25, v: 1, seed: 7, frames: n2, cam: STAGE_CAM });
+        summary.perf[name] = { high: +hi.avg.toFixed(2), highP95: +hi.p95.toFixed(2), low: +lo.avg.toFixed(2), lowP95: +lo.p95.toFixed(2), camHigh: +hiC.avg.toFixed(2), camLow: +loC.avg.toFixed(2), prepMs: +hi.prepMs.toFixed(0) };
+        console.log(`perf ${name.padEnd(11)} avg ${hi.avg.toFixed(2)} ms (I=.9, p95 ${hi.p95.toFixed(2)}) | avg ${lo.avg.toFixed(2)} ms (I=.25) | stage cam ${hiC.avg.toFixed(2)} / ${loC.avg.toFixed(2)} ms | prepare ${hi.prepMs.toFixed(0)} ms`);
       }
       fs.writeFileSync(path.join(OUT, 'perf.json'), JSON.stringify(summary.perf, null, 2));
     }

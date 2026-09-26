@@ -444,22 +444,229 @@
     },
   };
 
-  /* Web font readiness. Resolves when the families have loaded the glyphs
-   * for `sample` (or after `timeoutMs`, whichever first). Never rejects. */
+  /* ------------------------------------------------------------------ */
+  /* Web fonts: one exact-text subset per family                          */
+  /* ------------------------------------------------------------------ */
+  /*
+   * The full Google Fonts stylesheet splits every CJK face into ~100
+   * unicode-range slices; lyric text touches ~30 slices per family (200–430
+   * requests for the 17 faces) and canvas text often drew with a fallback
+   * face before its slice arrived. MV.fonts.ensure(sample) instead asks for
+   * ONE subset font per family containing exactly the characters we draw
+   * (css2 `text=` parameter):
+   *
+   *   1. chars = unique code points of `sample` + BASE_TEXT (UI / HUD / credit
+   *      characters, digits, Latin letters, punctuation), sorted;
+   *   2. once per distinct char set (a set covered by an earlier request is
+   *      reused) inject <link rel=stylesheet> to fonts.googleapis.com/css2 for
+   *      all MV.FONTS.webFamilies with &text=<chars> — split into several links
+   *      above MAX_TEXT characters, because Google silently answers requests
+   *      with more than 800 characters with the full sliced stylesheet;
+   *   3. wait for the stylesheet's load event, then document.fonts.load() each
+   *      family with that text;
+   *   4. resolve a report from FontFace.status. Never rejects; after
+   *      `timeoutMs` (default 10 s) it resolves with what is known by then
+   *      (unfinished families are listed in `failed` and `pending`).
+   *
+   * The subset @font-face rules come after index.html's static stylesheet
+   * (which only carries the faces the HTML UI uses), so they win for their
+   * characters (CSS Fonts: the last defined face is tried first when
+   * unicode-ranges overlap); other characters fall back as usual. No fetch /
+   * XHR is involved, so this works from file:// (network permitting) and in
+   * sandboxed iframes whose CSP only allows fonts.googleapis.com stylesheets.
+   *
+   * Report: { loaded: ['Anton 400', …], failed: [...], pending: [...],
+   *           timedOut, chars, links, error? }
+   */
+  const FONT_CSS = 'https://fonts.googleapis.com/css2';
+  const FONT_TIMEOUT = 10000;
+  const MAX_TEXT = 700; // characters per stylesheet (Google subsets up to 800)
+  const RETRY_MS = 20000; // a failed stylesheet is requested again after this long
+  const BASE_TEXT = (() => {
+    let s = '';
+    for (let c = 0x20; c < 0x7f; c++) s += String.fromCharCode(c); // printable ASCII
+    // Typographic punctuation / symbols the HUD, credits and effects draw.
+    s += '‘’“”–—―…•·×°★☆♪♫←→';
+    // CJK punctuation (、。，．・：；！？「」『』【】〈〉《》（）［］〜～ー々).
+    s += '、。，．・：；！？「」『』【】〈〉《》';
+    s += '（）［］〜～ー々';
+    // Credit labels (作詞 作曲 編曲 歌 唄 曲 词).
+    s += '作詞曲編歌唄词';
+    return s;
+  })();
+  const fontEntries = []; // { chars: Set, key, links: [HTMLLinkElement], ready: Promise<boolean>, state }
+
+  /** Sorted unique drawable characters of `str` (every whitespace → ' '). */
+  function fontChars(str) {
+    const set = new Set();
+    for (const ch of String(str == null ? '' : str)) {
+      const cp = ch.codePointAt(0);
+      if (/\s/u.test(ch)) {
+        set.add(' ');
+        continue;
+      }
+      if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0) || (cp >= 0xd800 && cp <= 0xdfff) || (cp >= 0xfe00 && cp <= 0xfe0f)) continue;
+      set.add(ch);
+    }
+    return Array.from(set).sort((a, b) => a.codePointAt(0) - b.codePointAt(0));
+  }
+  /** family=…:wght@… query part for MV.FONTS.webFamilies (stable order). */
+  function fontFamilyQuery() {
+    const byFam = new Map();
+    for (const [fam, w] of MV.FONTS.webFamilies || []) {
+      if (!byFam.has(fam)) byFam.set(fam, new Set());
+      byFam.get(fam).add(+w || 400);
+    }
+    return Array.from(byFam.keys())
+      .sort()
+      .map((fam) => {
+        const ws = Array.from(byFam.get(fam)).sort((a, b) => a - b);
+        const name = encodeURIComponent(fam).replace(/%20/g, '+');
+        return 'family=' + name + (ws.length === 1 && ws[0] === 400 ? '' : ':wght@' + ws.join(';'));
+      })
+      .join('&');
+  }
+  /** Stylesheet URLs (one per ≤ MAX_TEXT characters) for a sorted char list. */
+  function fontURLs(chars) {
+    const fams = fontFamilyQuery();
+    const urls = [];
+    for (let i = 0; i < chars.length; i += MAX_TEXT) {
+      const text = chars.slice(i, i + MAX_TEXT).join('');
+      urls.push(FONT_CSS + '?' + fams + '&text=' + encodeURIComponent(text) + '&display=swap');
+    }
+    return urls;
+  }
+  /** Inject the subset stylesheet(s) for `chars`; entry.ready → true when all loaded. */
+  function fontInject(chars, key) {
+    const entry = { chars: new Set(chars), key, links: [], state: 'loading', ready: null };
+    const head = document.head || document.documentElement;
+    const jobs = fontURLs(chars).map(
+      (href) =>
+        new Promise((resolve) => {
+          const link = document.createElement('link');
+          link.rel = 'stylesheet';
+          link.href = href;
+          link.setAttribute('data-mv-fonts', String(chars.length));
+          link.addEventListener('load', () => resolve(true), { once: true });
+          link.addEventListener('error', () => resolve(false), { once: true });
+          entry.links.push(link);
+          head.appendChild(link);
+        })
+    );
+    entry.ready = Promise.all(jobs).then((oks) => {
+      const ok = oks.every(Boolean);
+      entry.state = ok ? 'ok' : 'error';
+      if (!ok) {
+        // Drop the failed sheets. Identical requests within RETRY_MS reuse the
+        // failure (no console error per call while offline / blocked); after
+        // that a new call injects the stylesheet again.
+        entry.links.forEach((l) => l.remove());
+        setTimeout(() => {
+          const i = fontEntries.indexOf(entry);
+          if (i >= 0) fontEntries.splice(i, 1);
+        }, RETRY_MS);
+      }
+      return ok;
+    });
+    fontEntries.push(entry);
+    return entry;
+  }
+  /** An entry whose characters cover `chars` (exact key first), or null. */
+  function fontFind(chars, key) {
+    let hit = null;
+    for (const e of fontEntries) {
+      if (e.key === key) return e; // includes a recent failure (see fontInject)
+      if (!hit && e.state !== 'error' && chars.every((c) => e.chars.has(c))) hit = e;
+    }
+    return hit;
+  }
+
   MV.fonts = {
-    ensure(sample = '', timeoutMs = 8000) {
-      if (!document.fonts || !document.fonts.load) return Promise.resolve();
-      const text = (sample || '') + 'ABCabc0123あア星';
-      const jobs = MV.FONTS.webFamilies.map(([fam, w]) =>
-        document.fonts.load(`${w} 64px "${fam}"`, text).catch(() => null)
-      );
-      const timeout = new Promise((r) => setTimeout(r, timeoutMs));
-      return Promise.race([Promise.all(jobs), timeout]).then(() => undefined);
+    /** Characters every subset carries in addition to the sample. */
+    BASE: BASE_TEXT,
+    TIMEOUT: FONT_TIMEOUT,
+    /** Last report resolved by ensure() (for the debug overlay / tests). */
+    last: null,
+    /** Sorted unique characters ensure(sample) would request. */
+    chars: (sample) => fontChars(String(sample == null ? '' : sample) + BASE_TEXT),
+    /** Stylesheet URL(s) ensure(sample) would inject. */
+    urls: (sample) => fontURLs(fontChars(String(sample == null ? '' : sample) + BASE_TEXT)),
+    /** Number of subset stylesheets injected so far (successful or pending). */
+    linkCount: () => fontEntries.reduce((n, e) => n + (e.state === 'error' ? 0 : e.links.length), 0),
+
+    /**
+     * Load the web-font glyphs for `sample` (see the section comment above).
+     * @param {string} [sample] every string that will be drawn
+     * @param {number} [timeoutMs=10000]
+     * @returns {Promise<{loaded:string[], failed:string[], pending:string[], timedOut:boolean, chars:number, links:number, error?:string}>}
+     */
+    ensure(sample = '', timeoutMs = FONT_TIMEOUT) {
+      const limit = isFinite(+timeoutMs) ? Math.max(0, +timeoutMs) : FONT_TIMEOUT;
+      const fams = (MV.FONTS.webFamilies || []).map(([fam, w]) => ({ fam, w: +w || 400, label: fam + ' ' + (+w || 400), status: 'pending' }));
+      let chars = [];
+      let entry = null;
+      const report = (timedOut, error) => {
+        const rep = {
+          loaded: fams.filter((f) => f.status === 'loaded').map((f) => f.label),
+          failed: fams.filter((f) => f.status !== 'loaded').map((f) => f.label),
+          pending: fams.filter((f) => f.status === 'pending').map((f) => f.label),
+          timedOut: !!timedOut,
+          chars: chars.length,
+          links: entry ? entry.links.length : 0,
+        };
+        if (error) rep.error = error;
+        if (!timedOut) MV.fonts.last = rep;
+        return rep;
+      };
+      try {
+        if (typeof document === 'undefined' || !document.fonts || typeof document.fonts.load !== 'function') {
+          return Promise.resolve(report(false, 'unsupported'));
+        }
+        chars = fontChars(String(sample == null ? '' : sample) + BASE_TEXT);
+        const key = chars.join('');
+        entry = fontFind(chars, key) || fontInject(chars, key);
+        const text = key;
+        const done = entry.ready.then((ok) => {
+          if (!ok) {
+            fams.forEach((f) => (f.status = 'failed'));
+            return report(false, 'stylesheet');
+          }
+          return Promise.all(
+            fams.map((f) =>
+              document.fonts.load(`${f.w} 64px "${f.fam}"`, text).then(
+                (faces) => {
+                  const list = Array.from(faces || []);
+                  f.status = list.length && list.every((x) => x.status === 'loaded') ? 'loaded' : 'failed';
+                },
+                () => {
+                  f.status = 'failed';
+                }
+              )
+            )
+          ).then(() => report(false));
+        });
+        return new Promise((resolve) => {
+          let settled = false;
+          const finish = (rep) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(rep);
+          };
+          const timer = setTimeout(() => finish(report(true)), limit);
+          done.then(finish, (e) => finish(report(false, String((e && e.message) || e))));
+        });
+      } catch (e) {
+        fams.forEach((f) => f.status !== 'loaded' && (f.status = 'failed'));
+        return Promise.resolve(report(false, String((e && e.message) || e)));
+      }
     },
   };
 
   /* ------------------------------------------------------------------ */
-  /* Lyric text canonicalisation (must match mv/tools/gen_preset.py).    */
+  /* Lyric text canonicalisation. The preset generator must apply exactly */
+  /* these rules; it is kept outside the repository because it embeds     */
+  /* lyric fragments (see rule 1 in docs/ARCHITECTURE.md).                */
   /* ------------------------------------------------------------------ */
   // Display form: whitespace (incl. U+3000) collapsed, trimmed. Offsets in
   // presets are code-point indices into this string.

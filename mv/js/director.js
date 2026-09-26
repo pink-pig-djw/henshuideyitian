@@ -24,6 +24,17 @@
  * optional { dt, quality } it is given) and runs in well under 0.5 ms.
  * No Math.random / Date.now / performance.now anywhere in this file.
  *
+ * Bars: section cuts, bar-mode scene switches, chorus flashes / frames,
+ * confetti and the credits start all sit on the TRUE downbeats — the feature
+ * downbeats, else preset.beats[downbeatPhase::beatsPerBar]. Section starts
+ * within 0.15 s of a downbeat snap onto it. Transitions play mostly before
+ * their cut and land ≤ 0.16 s after it (the new scene is in on the hit).
+ *
+ * Accents: `stars` / `speedlines` accents that live while lyrics are on screen
+ * carry `avoid = { mode: 'away' | 'focus', lines: [{ line, style, id }] }`;
+ * the Stage turns the lines' layout bounds into a burst position off the text
+ * ('away') or a focus on the sung line ('focus').
+ *
  * Works without MV.Analysis (small internal fallbacks), without features
  * (preset grid + synthetic envelopes) and without a track (no lyrics).
  * The track's Line objects are never mutated: refined visibility windows are
@@ -85,8 +96,12 @@
   const STRONG = ['slash-wipe', 'shatter', 'ink-wipe', 'star-iris'];
   const LIGHT = ['glitch-cut', 'zoom-punch', 'stripe-wipe', 'red-flash'];
   const SOFT = ['ink-wipe', 'star-iris'];
-  const T_LEAD = 0.25, T_TAIL = 0.15; // nominal split of a transition around its cut
+  // A transition plays mostly *before* its cut (the downbeat / phrase start)
+  // and lands at most T_MAX_TAIL after it, so the new scene is in on the hit:
+  // tail = min(T_MAX_TAIL, dur · T_TAIL / (T_LEAD + T_TAIL)), lead = dur − tail.
+  const T_LEAD = 0.25, T_TAIL = 0.15, T_MAX_TAIL = 0.16;
   const QUIET = 0.35; //                intensity below which sections cut softly
+  const SNAP_SECTION = 0.15; //         section starts this close to a downbeat snap onto it
 
   /** Default effect durations (fx.js). */
   const E_DUR = {
@@ -159,7 +174,14 @@
       const sinceBeat = Math.max(0, t - t0);
       const beatInBar = mod(index - dbp, bpb);
       const kd = index - beatInBar;
-      const tDown = n >= 2 && kd >= 0 && kd < n ? beats[kd] : n >= 2 && kd >= n ? beats[n - 1] + (kd - n + 1) * (beats[n - 1] - beats[n - 2]) : t0 - beatInBar * period;
+      // Bar start, extrapolated on the first / last beat period outside the
+      // grid (same rule as MV.Analysis.beatInfo, e.g. the pickup beats before
+      // the first true downbeat when downbeatPhase > 0).
+      let tDown;
+      if (n < 2) tDown = t0 - beatInBar * period;
+      else if (kd < 0) tDown = beats[0] + kd * (beats[1] - beats[0]);
+      else if (kd >= n) tDown = beats[n - 1] + (kd - n + 1) * (beats[n - 1] - beats[n - 2]);
+      else tDown = beats[kd];
       const sinceDownbeat = Math.max(0, t - tDown);
       const phase = clamp(sinceBeat / period, 0, 0.999999);
       return {
@@ -289,14 +311,15 @@
       downbeatPhase = 0;
       downbeats = null;
     }
-    if (downbeatPhase == null) {
-      downbeatPhase = 0;
-      if (downbeats && downbeats.length) {
-        let i = lowerIndex(beats, downbeats[0] + 0.02);
-        if (i < 0) i = 0;
-        downbeatPhase = mod(i, bpb);
-      }
+    if (downbeats && downbeats.length) {
+      // An explicit downbeat list wins over a missing / disagreeing phase, so
+      // env.beat.beatInBar and every downbeat-based cue use the same bars.
+      let i = lowerIndex(beats, downbeats[0] + 0.02);
+      if (i < 0) i = 0;
+      const ph = mod(i, bpb);
+      if (downbeatPhase == null || (Math.abs(beats[i] - downbeats[0]) < 0.05 && ph !== mod(downbeatPhase, bpb))) downbeatPhase = ph;
     }
+    if (downbeatPhase == null) downbeatPhase = 0;
     if (!downbeats) {
       downbeats = [];
       for (let k = 0; k < beats.length; k++) if (mod(k - downbeatPhase, bpb) === 0) downbeats.push(beats[k]);
@@ -322,6 +345,17 @@
     secs.sort((a, b) => a.start - b.start);
     secs = secs.filter((s) => s.end > s.start + 0.01 && s.start < duration);
     if (!secs.length) secs = [{ index: 0, kind: 'verse', name: 'VERSE', start: 0, end: duration, intensity: 0.5, scenes: DEFAULT_SCENES.verse.slice(), switchBars: 2, switchOn: null, credits: false, endCard: false }];
+    // Section starts a hair off the bar grid snap onto the true downbeat:
+    // section cuts, transitions, flashes and bar counting are downbeat-based.
+    const DB = this.downbeats;
+    for (let i = 1; i < secs.length && DB.length; i++) {
+      const s = secs[i];
+      const j = lowerIndex(DB, s.start);
+      let best = j >= 0 ? DB[j] : DB[0];
+      if (j + 1 < DB.length && Math.abs(DB[j + 1] - s.start) < Math.abs(best - s.start)) best = DB[j + 1];
+      const d = Math.abs(best - s.start);
+      if (d > 1e-6 && d <= SNAP_SECTION && best > secs[i - 1].start + 0.5 && best < s.end - 0.5) s.start = best;
+    }
     secs.forEach((s, i) => {
       s.index = i;
       if (i > 0) secs[i - 1].end = s.start;
@@ -329,6 +363,17 @@
     });
     secs[0].start = 0;
     secs[secs.length - 1].end = Math.max(secs[secs.length - 1].end, duration);
+    // Visual start (`cut`) of each section: its start when that is a bar line;
+    // a section that opens on a pickup (lyric-aligned, e.g. a hook sung from
+    // beat 4) cuts on the next true downbeat when that is < ½ bar away.
+    const barLen = (60 / bpm) * bpb;
+    secs.forEach((s, i) => {
+      s.cut = s.start;
+      if (i === 0 || !DB.length) return;
+      const j = lowerIndex(DB, s.start - 1e-6);
+      const nx = DB[j + 1];
+      if (nx != null && nx - s.start > 1e-6 && nx - s.start <= barLen * 0.5 && nx <= s.end - 1.5) s.cut = nx;
+    });
     this.sections = secs;
     this._secStarts = Float64Array.from(secs.map((s) => s.start));
 
@@ -431,8 +476,10 @@
     // computed sections) so the Stage never has to fall back.
     const known = MV.scenes && MV.scenes.list && MV.scenes.list().length ? (n) => MV.scenes.has(n) : () => true;
     for (const sec of S) {
-      // Cut points (absolute), first = section start.
-      const cuts = [sec.start];
+      // Cut points (absolute), first = the section's cut (its first true
+      // downbeat); scenes run until the next section's cut.
+      const cuts = [sec.cut];
+      const endCut = sec.index + 1 < S.length ? S[sec.index + 1].cut : this.duration;
       let list = sec.scenes.filter(known);
       if (!list.length) list = (DEFAULT_SCENES[sec.kind] || DEFAULT_SCENES.verse).filter(known);
       if (!list.length) list = MV.scenes && MV.scenes.list && MV.scenes.list().length ? MV.scenes.list() : ['void'];
@@ -446,12 +493,12 @@
         }
         if (!cand.length) {
           const D = this.downbeats;
-          let i0 = lowerIndex(D, sec.start - 0.05);
-          if (i0 < 0 || D[i0] < sec.start - 0.05) i0++;
-          for (let k = i0 + sec.switchBars; k < D.length && D[k] < sec.end; k += sec.switchBars) cand.push(D[k]);
+          let i0 = lowerIndex(D, sec.cut - 0.05);
+          if (i0 < 0 || D[i0] < sec.cut - 0.05) i0++;
+          for (let k = i0 + sec.switchBars; k < D.length && D[k] < endCut; k += sec.switchBars) cand.push(D[k]);
         }
         for (const c of cand) {
-          if (c - cuts[cuts.length - 1] >= minCue && sec.end - c >= minCue * 0.8) cuts.push(c);
+          if (c - cuts[cuts.length - 1] >= minCue && endCut - c >= minCue * 0.8) cuts.push(c);
         }
       }
       const prevName = cues.length ? cues[cues.length - 1].name : null;
@@ -506,12 +553,14 @@
       const name = pickWeighted(items, rnd(seed, 2));
       const reg = MV.transitions && MV.transitions.get && MV.transitions.get(name);
       const dur = clamp(fin(reg && reg.duration, T_DUR[name] || 0.4), 0.15, 1.6);
-      let lead = (dur * T_LEAD) / (T_LEAD + T_TAIL);
-      // Never start before the outgoing cue is fully in (or its own transition ended).
+      const tail = Math.min(T_MAX_TAIL, (dur * T_TAIL) / (T_LEAD + T_TAIL));
+      let lead = dur - tail;
+      // Never start before the outgoing cue is fully in (or its own transition
+      // ended): a clipped lead makes the transition shorter, the landing stays.
       const floor = Math.max(pc.cut + 0.1, pc.transition ? pc.transition.end + 0.02 : -Infinity);
       if (c.cut - lead < floor) lead = Math.max(0, c.cut - floor);
       const start = c.cut - lead;
-      const end = Math.min(start + dur, cues[i + 1] ? cues[i + 1].cut - 0.3 : this.duration);
+      const end = Math.min(c.cut + tail, cues[i + 1] ? cues[i + 1].cut - 0.3 : this.duration);
       if (end - start < 0.12) {
         prevT = null;
         continue;
@@ -554,16 +603,17 @@
     const sceneAt = (t) => this.sceneCueAt(t);
 
     if (o.accents !== false) {
-      // Section starts: shards (loud) or ink (quiet), plus a camera kick.
+      // Section starts (on their cut = true downbeat): shards (loud) or ink
+      // (quiet), plus a camera kick.
       for (const sec of S) {
         if (sec.index === 0) continue;
         const I = sec.intensity;
         if (sec.endCard && o.endCard !== false) continue;
         if (I >= 0.6) {
-          add('shards', sec.start, { strength: 0.6 + 0.5 * I, data: { dir: rnd(sec.seed, 1) < 0.5 ? -1 : 1 } });
-          shake(sec.start, 16 * I, 0.45);
+          add('shards', sec.cut, { strength: 0.6 + 0.5 * I, data: { dir: rnd(sec.seed, 1) < 0.5 ? -1 : 1 } });
+          shake(sec.cut, 16 * I, 0.45);
         } else {
-          add('ink', sec.start + 0.05, {
+          add('ink', sec.cut + 0.05, {
             strength: 0.55 + 0.5 * I,
             data: { color: I < QUIET ? 'red' : 'black', size: I < QUIET ? 0.8 : 1 },
           });
@@ -751,6 +801,7 @@
     }
 
     acc.sort((a, b) => a.t - b.t || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0));
+    this._markAvoid(acc);
     this.accents = acc;
     this._accShort = acc.filter((a) => a.dur <= LONG_ACCENT);
     this._accShortT = Float64Array.from(this._accShort.map((a) => a.t));
@@ -763,6 +814,36 @@
     this._glT = Float64Array.from(glitches.map((g) => g.t));
     this._flashes = acc.filter((a) => a.kind === 'flash');
     this._flashT = Float64Array.from(this._flashes.map((a) => a.t));
+  };
+
+  /**
+   * Big focal accents must not sit on the lyric. For every `stars` burst and
+   * `speedlines` accent, list the lyric lines on screen during its life
+   * (largest overlap first, ≤ 2) as `a.avoid = { mode, lines: [{ line, style, id }] }`:
+   *   mode 'away'  (stars)      → the burst centre moves off the lines' bounds
+   *   mode 'focus' (speedlines) → the focus goes to the sung line, so the clear
+   *                               centre of the lines frames the text
+   * Geometry needs the lyric layouts, so the Stage resolves it at draw time
+   * (MV.Stage: env.lyricBounds + accent placement); both sides are pure.
+   */
+  Director.prototype._markAvoid = function (acc) {
+    const L = this.lyricCues;
+    if (!L.length) return;
+    for (const a of acc) {
+      if (a.kind !== 'stars' && a.kind !== 'speedlines') continue;
+      const a0 = a.t, a1 = a.t + a.dur;
+      const hit = [];
+      for (const c of L) {
+        const ov = Math.min(a1, c.showEnd) - Math.max(a0, c.showStart);
+        if (ov > 0.05) hit.push({ ov, c });
+      }
+      if (!hit.length) continue;
+      hit.sort((x, y) => y.ov - x.ov || x.c.index - y.c.index);
+      a.avoid = {
+        mode: a.kind === 'speedlines' ? 'focus' : 'away',
+        lines: hit.slice(0, 2).map((h) => ({ line: h.c.line, style: h.c.style, id: h.c.id })),
+      };
+    }
   };
 
   Director.prototype._metaData = function () {

@@ -15,6 +15,22 @@
  * synthetic, deterministic envelopes). Rendering stays a pure function of t:
  * the wall clock / audio clock only choose which t is rendered.
  *
+ * Web fonts: index.html only links the faces the HTML UI uses. Whenever the
+ * lyrics change the app calls MV.fonts.ensure(<lyric lines + title + credits>)
+ * (exact-text Google Fonts subsets for every canvas face) and then
+ * stage.invalidateLayouts(); faces that arrive late (after the timeout) also
+ * invalidate the layouts ('loadingdone').
+ *
+ * Export: the exporter gets its own Director built from a deep copy of the
+ * current track (+ the same features / preset / options), and lyric, offset,
+ * HUD / credits and sync editing plus audio loading are locked until the
+ * export finishes or is cancelled, so frames cannot change mid-export.
+ *
+ * Sandboxed hosting (e.g. a claude.ai artifact iframe): no code path uses
+ * alert / confirm / prompt; every storage access is wrapped; downloads may be
+ * blocked there, so every download link (video, LRC) carries a note on how to
+ * export locally; the assets/ probe is skipped in framed / opaque-origin pages.
+ *
  * URL params: ?t=<s> (render that frame, paused)  ?autoplay=1  ?quality=auto|1|0.75|0.5
  *             ?hud=0  ?debug=1  ?test=1 (no idle hide, static attract frame, 1 ms UI motion)
  *             ?audio=<url>|none  ?lyrics=<url|text>|none  ?autoload=0 (no assets / cache probing)
@@ -94,7 +110,23 @@
   const qget = (k) => Q.get(k);
   const TEST = qget('test') === '1';
   const AUTOLOAD = qget('autoload') !== '0';
-  const ASSETS = AUTOLOAD && qget('assets') !== '0';
+  // Sandboxed (opaque origin) or framed pages — e.g. a claude.ai artifact — have
+  // no assets/ folder and may forbid fetch by CSP: skip that probe there.
+  const OPAQUE = (() => {
+    try {
+      return window.origin === 'null';
+    } catch (e) {
+      return true;
+    }
+  })();
+  const FRAMED = (() => {
+    try {
+      return window.self !== window.top;
+    } catch (e) {
+      return true;
+    }
+  })();
+  const ASSETS = AUTOLOAD && qget('assets') !== '0' && !OPAQUE && !FRAMED;
 
   /** m:ss (or m:ss.cc with `precise`). */
   function fmtClock(sec, precise) {
@@ -141,8 +173,25 @@
   const IDLE_MS = 2500;
   const ATTRACT_FPS = 30;
   const OFFSET_MAX = 2;
-  // Silent attract reel (preset timeline seconds, [start, length]).
-  const REEL = [[0.9, 8.4], [46.35, 7.2], [112.2, 7.4], [66.55, 5.6], [142.35, 7.0], [190.35, 8.0], [96.2, 6.2], [212.1, 7.6]];
+  const FONT_TIMEOUT = 10000;
+  const FONT_RETRIES = 2;
+  // Shown next to every download link: sandboxed previews (e.g. claude.ai) block downloads.
+  const DL_NOTE = '如果点击后没有开始下载（例如在 claude.ai 预览中打开），请把项目下载到本地后用 Chrome / Edge 打开再导出。';
+  // Silent attract reel, preset-timeline seconds: { at, len, sec? }. With `sec`
+  // = [kind, n, lead] a clip opens `lead` s after the start of the n-th section
+  // of that kind (section starts sit on true downbeats), so the reel follows a
+  // regenerated preset; `at` is the fallback. Clips without `sec` show lyric /
+  // credit moments at fixed times (lyric timing does not move).
+  const REEL = [
+    { at: 0.9, len: 8.4 },
+    { at: 45.75, len: 7.2, sec: ['chorus', 0, 0.03] },
+    { at: 112.2, len: 7.4 },
+    { at: 66.55, len: 5.6, sec: ['hook', 0, 0.05] },
+    { at: 141.77, len: 7.0, sec: ['chorus', 1, 0.03] },
+    { at: 189.75, len: 8.0, sec: ['climax', 0, 0.03] },
+    { at: 96.2, len: 6.2 },
+    { at: 211.5, len: 7.6, sec: ['outro', 0, 0.17] },
+  ];
   const TEST_ATTRACT_T = 48.2;
   // Seek-bar look per section kind (MV.C tokens only).
   const KIND_STYLE = {
@@ -209,6 +258,13 @@
     exporter: null,
     exportResult: null,
     exportURL: null,
+    lrcURL: null,
+    fontsPromise: null,
+    fontReport: null, //   last MV.fonts.ensure report
+    fontRetries: 0,
+    fontRetryTimer: 0,
+    fontNoticed: false,
+    reel: null, //         attract reel resolved against the base preset
     exportOpts: { res: '1080', fps: '30', range: 'all', from: 0, to: 10 },
     caps: null,
     sync: null,
@@ -357,6 +413,10 @@
    * Change a setting (persisted). k: 'hud' | 'credits' | 'quality' | 'debug' | 'volume'.
    */
   function setSetting(k, v) {
+    if ((k === 'hud' || k === 'credits') && exportBusy('信息条 / 制作人员字幕')) {
+      syncSettingsUI();
+      return;
+    }
     if (k === 'quality') v = String(v) === '1.0' ? '1' : String(v);
     S.settings[k] = v;
     delete S.override[k];
@@ -426,6 +486,10 @@
   }
   /** Set the global lyric offset (s, ±2, persisted per preset) and re-time the track. */
   function setLyricOffset(v, opts = {}) {
+    if (exportBusy('歌词偏移')) {
+      syncSettingsUI();
+      return S.lyricOffset;
+    }
     v = Math.round(clamp(fin(+v, 0), -OFFSET_MAX, OFFSET_MAX) * 1000) / 1000;
     if (Math.abs(v) < 1e-6) v = 0;
     S.lyricOffset = v;
@@ -479,6 +543,10 @@
     const mk = () => new Float32Array(n);
     const rms = mk(), low = mk(), mid = mk(), high = mk(), flux = mk();
     const beats = (p && p.beats && p.beats.length ? p.beats : []).filter((b) => b <= dur);
+    const bpb = (p && p.beatsPerBar) || 4;
+    // preset.downbeatPhase: index (mod beatsPerBar) of the preset beat that starts a bar.
+    const dbp = (((fin(p && p.downbeatPhase, 0) | 0) % bpb) + bpb) % bpb;
+    const isDown = (k) => (((k - dbp) % bpb) + bpb) % bpb === 0;
     const secs = (p && p.sections) || [{ kind: 'verse', start: 0, end: dur, intensity: 0.5 }];
     const rnd = MV.rand || ((s, i, j) => (((Math.sin(s * 12.9898 + i * 78.233 + (j || 0) * 37.719) * 43758.5453) % 1) + 1) % 1);
     const low2 = MV.lowerIndex || ((arr, x) => {
@@ -502,12 +570,12 @@
     }
     const onsets = beats.map((b, k) => {
       const s = secs.find((x) => b >= x.start && b < x.end) || secs[secs.length - 1];
-      return { t: b, s: clamp((k % 4 === 0 ? 0.75 : 0.45) + 0.35 * fin(s.intensity, 0.5) * rnd(91, k)) };
+      return { t: b, s: clamp((isDown(k) ? 0.75 : 0.45) + 0.35 * fin(s.intensity, 0.5) * rnd(91, k)) };
     });
     const f = {
       duration: dur, sampleRate: 22050, fps, length: n, rms, low, mid, high, flux, onsets, kicks: [],
-      bpm: (p && p.bpm) || 120, beatsPerBar: (p && p.beatsPerBar) || 4, beats: beats.slice(),
-      downbeats: beats.filter((_, k) => k % 4 === 0),
+      bpm: (p && p.bpm) || 120, beatsPerBar: bpb, beats: beats.slice(),
+      downbeats: beats.filter((_, k) => isDown(k)), downbeatPhase: dbp,
       sections: secs.map((s) => Object.assign({}, s)), novelty: new Float32Array(0),
       source: 'computed', presetId: null, presetOffset: 0, presetConfidence: 0, synthetic: true,
     };
@@ -542,7 +610,10 @@
     this.duration = fin(f.duration, 0) || presetDuration(p);
     const src = (f.sections && f.sections.length ? f.sections : p.sections) || [{ kind: 'verse', name: 'VERSE', start: 0, end: this.duration }];
     this.sections = src.map((x, i) => ({ index: i, kind: x.kind || 'verse', name: x.name || String(x.kind || 'verse').toUpperCase(), start: x.start, end: x.end, intensity: fin(x.intensity, 0.5) }));
-    this.beats = (f.beats && f.beats.length ? f.beats : p.beats) || [];
+    const own = !!(f.beats && f.beats.length);
+    this.beats = (own ? f.beats : p.beats) || [];
+    // Beat index (mod 4) that starts a bar (features / preset downbeatPhase).
+    this.downbeatPhase = ((((fin(own ? f.downbeatPhase : p.downbeatPhase, 0) | 0) % 4) + 4) % 4);
     this.bpm = fin(f.bpm, 0) || fin(p.bpm, 0) || 120;
     this.meta = p.meta || {};
   }
@@ -572,13 +643,13 @@
     const bt = bi >= 0 ? this.beats[bi] : 0;
     const since = Math.max(0, t - bt);
     const pulse = Math.exp((-since * 4.6) / 0.35);
-    const inBar = ((bi % 4) + 4) % 4;
+    const inBar = (((bi - this.downbeatPhase) % 4) + 4) % 4;
     const I = clamp(sec.intensity);
     const quiet = { intro: 1, verse: 1, bridge: 1, outro: 1, build: 1 };
     const scenes = { bridge: 'starfield', outro: 'starfield', build: 'starfield', verse: 'night-city', intro: 'sunburst' };
     const env = {
       t, dt: 1 / 60, duration: this.duration, energy: I, low: I * (0.6 + 0.4 * pulse), mid: I * 0.8, high: I * 0.6, flux: pulse * I, onsetPulse: pulse * I,
-      beat: { index: bi, phase: clamp(since / period), period, bar: Math.floor(bi / 4), barPhase: (inBar + clamp(since / period)) / 4, beatInBar: inBar, sinceBeat: since, sinceDownbeat: since + inBar * period, pulse, barPulse: inBar === 0 ? pulse : 0 },
+      beat: { index: bi, phase: clamp(since / period), period, bar: Math.floor((bi - this.downbeatPhase) / 4), barPhase: (inBar + clamp(since / period)) / 4, beatInBar: inBar, sinceBeat: since, sinceDownbeat: since + inBar * period, pulse, barPulse: inBar === 0 ? pulse : 0 },
       section: { kind: sec.kind, name: sec.name, start: sec.start, end: sec.end, index: sec.index, progress: clamp((t - sec.start) / Math.max(0.01, sec.end - sec.start)), intensity: I },
       intensity: I, quality: 1, seed: 1 + sec.index,
     };
@@ -655,21 +726,90 @@
     const fonts = refreshFonts();
     if (TEST) await fonts;
   }
-  /** Load web-font glyphs for every drawable string, then re-layout. */
-  function refreshFonts() {
-    if (!MV.fonts || !MV.fonts.ensure) return Promise.resolve();
-    let sample = '';
+  /**
+   * Every string the canvas may draw: all lyric lines of the track, title and
+   * credits (preset / track meta, via the director too) and the glyphs lyric
+   * styles add themselves (glitch scramble set).
+   */
+  function fontSample() {
+    const parts = [];
     try {
-      sample = (S.director && S.director.fontText ? S.director.fontText() : '') + ((MV.LyricFX && MV.LyricFX.fontSample) || '');
+      if (S.director && S.director.fontText) parts.push(S.director.fontText());
+      if (S.track && S.track.lines) for (const l of S.track.lines) parts.push(l && l.text);
+      for (const p of [activePreset(), S.basePreset]) {
+        const m = (p && p.meta) || {};
+        parts.push(m.title, m.titleLatin, m.artist, m.lyricist, m.composer);
+      }
+      const tm = (S.track && S.track.meta) || {};
+      parts.push(tm.title, tm.artist);
+      if (MV.LyricFX && MV.LyricFX.fontSample) parts.push(MV.LyricFX.fontSample);
     } catch (e) {
-      sample = '';
+      /* partial sample */
     }
-    const p = MV.fonts.ensure(sample, 8000).then(() => {
-      if (S.stage) S.stage.invalidateLayouts();
-      S.dirty = true;
-    });
+    return parts.filter((x) => typeof x === 'string' && x).join('');
+  }
+  /**
+   * Load the web-font glyphs for fontSample() (MV.fonts.ensure: exact-text
+   * subsets, once per distinct character set), then re-layout the lyrics.
+   * Resolves with the font report (never rejects).
+   */
+  function refreshFonts() {
+    if (!MV.fonts || !MV.fonts.ensure) return Promise.resolve(null);
+    let job;
+    try {
+      job = Promise.resolve(MV.fonts.ensure(fontSample(), FONT_TIMEOUT));
+    } catch (e) {
+      job = Promise.resolve(null);
+    }
+    const p = job.then(
+      (rep) => {
+        if (rep) S.fontReport = rep;
+        if (S.stage) S.stage.invalidateLayouts();
+        S.dirty = true;
+        if (rep && rep.failed && rep.failed.length) onFontTrouble(rep);
+        return rep || null;
+      },
+      () => null
+    );
     S.fontsPromise = p;
     return p;
+  }
+  /** Some faces did not load: say so once, retry a couple of times later. */
+  function onFontTrouble(rep) {
+    if (rep.error === 'unsupported') return;
+    if (!S.fontNoticed) {
+      S.fontNoticed = true;
+      const slow = rep.timedOut && !rep.error;
+      toast(
+        (slow ? '<b>网页字体载入较慢</b> · 画面暂用系统字体，载入后自动替换' : '<b>部分网页字体未能载入</b> · 画面改用系统字体（可能离线或被网络拦截）') +
+          '<br>Web fonts ' + (slow ? 'are slow — using system fonts for now' : 'unavailable — using system fonts'),
+        'info',
+        { key: 'fonts', ms: 6000 }
+      );
+    }
+    if (!rep.timedOut && S.fontRetries < FONT_RETRIES && !S.fontRetryTimer) {
+      S.fontRetries++;
+      S.fontRetryTimer = setTimeout(() => {
+        S.fontRetryTimer = 0;
+        refreshFonts();
+      }, 21000);
+    }
+  }
+  /** Faces that finish after an ensure() timeout still refresh the lyric layouts. */
+  function bindFontEvents() {
+    try {
+      if (!document.fonts || !document.fonts.addEventListener) return;
+      let tm = 0;
+      document.fonts.addEventListener('loadingdone', () => {
+        clearTimeout(tm);
+        tm = setTimeout(() => {
+          if (S.stage) S.stage.invalidateLayouts();
+          S.dirty = true;
+        }, 120);
+      });
+    } catch (e) {
+      /* layouts refresh on the next ensure() */
+    }
   }
 
   /** Render the frame at song time t into the visible canvas. */
@@ -729,14 +869,32 @@
     }
   }
 
+  /** REEL as [start, length] pairs in preset-timeline seconds (cached per preset). */
+  function reelClips() {
+    const p = S.basePreset;
+    if (S.reel && S.reel.preset === p) return S.reel.clips;
+    const secs = (p && p.sections) || [];
+    const clips = REEL.map((r) => {
+      let at = r.at;
+      if (r.sec) {
+        const hits = secs.filter((s) => s.kind === r.sec[0]);
+        const s = hits[r.sec[1]];
+        if (s && isFinite(s.start)) at = s.start + r.sec[2];
+      }
+      return [at, r.len];
+    });
+    S.reel = { preset: p, clips };
+    return clips;
+  }
   function attractTime(now) {
     if (!S.attractT0) S.attractT0 = now;
     const dur = duration();
     const scale = S.basePreset ? dur / presetDuration(S.basePreset) : 1;
+    const clips = reelClips();
     let total = 0;
-    for (const r of REEL) total += r[1];
+    for (const r of clips) total += r[1];
     let e = ((now - S.attractT0) / 1000) % total;
-    for (const r of REEL) {
+    for (const r of clips) {
       if (e < r[1]) return clamp(r[0] * scale + e, 0, Math.max(0, dur - 0.02));
       e -= r[1];
     }
@@ -818,6 +976,10 @@
       'preset ' + (S.preset ? S.preset.id : S.mode === 'attract' && S.basePreset ? S.basePreset.id + ' (attract)' : '-') +
         (f ? '  offset ' + fin(f.presetOffset, 0).toFixed(3) + '  conf ' + fin(f.presetConfidence, 0).toFixed(2) + '  ' + f.source : ''),
       'lyrics ' + (S.track ? S.track.lines.length + ' (' + S.track.source + (S.track.synced ? ', synced' : '') + ')' : 'none') + '  offset ' + fmtOffset(S.lyricOffset),
+      S.fontReport
+        ? 'fonts ' + S.fontReport.loaded.length + '/' + (S.fontReport.loaded.length + S.fontReport.failed.length) + (S.fontReport.timedOut ? ' (slow)' : '') +
+          '  ' + S.fontReport.chars + ' chars  ' + (MV.fonts && MV.fonts.linkCount ? MV.fonts.linkCount() : 0) + ' subset sheet(s)'
+        : 'fonts …',
       'errors ' + (S.stage && S.stage.errors ? S.stage.errors.size : 0) + (S.missing.length ? '  missing ' + S.missing.length : ''),
     ];
     D.debugBox.textContent = lines.filter(Boolean).join('\n');
@@ -1034,9 +1196,10 @@
         const b = D.menuList.querySelector('[data-act="' + act + '"]');
         if (b) b.setAttribute('aria-disabled', dis ? 'true' : 'false');
       };
-      mark('sync', noAudio || !MV.SyncEditor);
+      const exporting = !!S.exporter; // editing is locked while an export runs
+      mark('sync', noAudio || !MV.SyncEditor || exporting);
       mark('export', !MV.Exporter);
-      mark('audio', !MV.AudioEngine);
+      mark('audio', !MV.AudioEngine || exporting);
     }
     // Stage tag / banner / bar state.
     if (D.attractTag) D.attractTag.hidden = S.mode !== 'attract' || S.uiHidden;
@@ -1245,6 +1408,7 @@
       toast('音频模块缺失，无法载入 · MV.AudioEngine missing', 'error', { key: 'no-engine' });
       return;
     }
+    if (exportBusy('载入音频')) return;
     if (D.fileAudio) {
       D.fileAudio.value = '';
       D.fileAudio.click();
@@ -1263,6 +1427,7 @@
    * match a preset and rebuild the director. Resolves true on success.
    */
   function loadAudio(src, opts = {}) {
+    if (exportBusy('载入音频')) return Promise.resolve(false);
     const job = loadAudioJob(src, opts);
     S.loading = job;
     job.then(() => {
@@ -1476,6 +1641,7 @@
    * opts: { source: 'paste'|'file'|'url'|'assets'|'storage'|'api', persist: true }
    */
   function setLyricsText(text, opts = {}) {
+    if (exportBusy('\u6B4C\u8BCD')) return lyricsState();
     text = String(text == null ? '' : text).replace(/^\uFEFF/, '');
     const changed = text !== S.lyricsText;
     S.lyricsText = text;
@@ -1526,6 +1692,7 @@
     renderLyricsResult();
   }
   function applyLyricsFromPanel() {
+    if (exportBusy('歌词')) return;
     const txt = D.lyricsText.value;
     D.lyricsText._dirty = false;
     const st = setLyricsText(txt, { source: 'paste' });
@@ -1563,6 +1730,7 @@
   async function handleFiles(list) {
     const files = Array.from(list || []);
     if (!files.length) return;
+    if (exportBusy('载入文件')) return;
     let used = false;
     const text = files.find(isTextFile);
     const audio = files.find((f) => isAudioFile(f) && !isTextFile(f));
@@ -1754,6 +1922,7 @@
       toast('对轴模块缺失 · MV.SyncEditor missing', 'error', { key: 'no-sync' });
       return;
     }
+    if (exportBusy('对轴')) return;
     if (!S.audio) {
       toast('请先载入音频再对轴 · Load audio first', 'info', { key: 'need-audio' });
       return;
@@ -1786,6 +1955,7 @@
               saveSynced(tr);
               S.track = buildTrack() || tr;
               if (S.director) S.director.setTrack(S.track);
+              refreshFonts();
             }
             syncSettingsUI();
             updateStatus();
@@ -1801,6 +1971,7 @@
           },
         });
       } else if (S.sync.setPreset) S.sync.setPreset(S.preset);
+      wrapLrcExport(S.sync);
       S.sync.open();
       wake();
     } catch (e) {
@@ -1810,6 +1981,41 @@
   function toggleSync() {
     if (S.sync && S.sync.isOpen) S.sync.close();
     else openSync();
+  }
+  /**
+   * The editor's "导出 LRC" saves through a temporary <a download>, which a
+   * sandboxed preview silently blocks: follow every LRC export with a toast
+   * holding a second download link and the local-export note.
+   */
+  function wrapLrcExport(ed) {
+    if (!ed || ed._mvLrcNote || typeof ed.exportLRC !== 'function') return;
+    const orig = ed.exportLRC;
+    ed.exportLRC = function () {
+      const lrc = orig.apply(this, arguments);
+      if (lrc) showLrcDownload(lrc);
+      return lrc;
+    };
+    ed._mvLrcNote = true;
+  }
+  function showLrcDownload(lrc) {
+    let href = '';
+    try {
+      if (S.lrcURL) URL.revokeObjectURL(S.lrcURL);
+      S.lrcURL = URL.createObjectURL(new Blob([lrc], { type: 'text/plain;charset=utf-8' }));
+      href = S.lrcURL;
+    } catch (e) {
+      S.lrcURL = null;
+    }
+    const p = activePreset();
+    const name = (String((p && p.id) || 'lyrics').replace(/[^A-Za-z0-9._-]+/g, '-') || 'lyrics') + '.lrc';
+    dismissToast('lrc-export'); // a repeated export gets a fresh link
+    toast(
+      '<b>LRC 已导出</b>' +
+        (href ? ' · <a class="toast-link" id="lrcDownload" href="' + href + '" download="' + esc(name) + '">再次下载 .lrc · DOWNLOAD</a>' : '') +
+        '<span class="dl-note">' + esc(DL_NOTE) + '</span>',
+      'ok',
+      { key: 'lrc-export', ms: 12000 }
+    );
   }
 
   /* ------------------------------------------------------------------ */
@@ -1907,9 +2113,18 @@
     const fps = fin(+opts.fps, +S.exportOpts.fps) || 30;
     const range = Array.isArray(opts.range) ? opts.range.slice(0, 2) : exportRange();
     if (S.engine && S.engine.playing) pause();
+    // The exporter's own Director, built from a snapshot: a deep copy of the
+    // track plus the current features / preset / options. Together with the
+    // edit lock below nothing the user does can change frames mid-export.
+    let track = S.track;
+    try {
+      if (track && MV.Lyrics && MV.Lyrics.clone) track = MV.Lyrics.clone(track);
+    } catch (e) {
+      track = S.track;
+    }
     const dcfg = {
       features: currentFeatures(),
-      track: S.track,
+      track,
       preset: S.mode === 'song' ? S.preset : S.basePreset,
       options: Object.assign(dirOptions(), { fps }),
     };
@@ -1941,6 +2156,7 @@
     }
     S.exporter = ex;
     S.exportStarted = wallNow();
+    setExportLock(true);
     D.exResult.hidden = true;
     D.exProgress.hidden = false;
     showExportProgress(0, { phase: 'prepare' });
@@ -1954,9 +2170,32 @@
       throw e;
     } finally {
       S.exporter = null;
+      setExportLock(false);
       syncExportUI();
       S.dirty = true;
     }
+  }
+  /**
+   * Lock (or unlock) everything that would change the rendered frames while
+   * an export runs: lyric text, offset, HUD / credits, the sync editor and
+   * audio loading. Preview-only settings (quality, volume, debug) stay live.
+   */
+  function setExportLock(on) {
+    on = !!on;
+    document.body.classList.toggle('is-exporting', on);
+    for (const el of [D.btnLyricsApply, D.btnLyricsFile, D.btnLyricsClear, D.setHud, D.setCredits, D.setOffset, D.offMinus, D.offPlus, D.offReset]) {
+      if (el) el.disabled = on;
+    }
+    if (D.lyricsText) D.lyricsText.readOnly = on;
+    document.querySelectorAll('[data-lock]').forEach((n) => (n.hidden = !on));
+    if (on && S.sync && S.sync.isOpen) S.sync.close();
+    updateStatus();
+  }
+  /** True while exporting (and says why the edit waits); false otherwise. */
+  function exportBusy(what) {
+    if (!S.exporter) return false;
+    toast('<b>导出进行中</b> · ' + esc(what) + '暂时锁定，导出完成或取消后恢复<br>Locked while exporting', 'info', { key: 'export-lock' });
+    return true;
   }
   function showExportProgress(p, info) {
     if (!D.exBarFill) return;
@@ -1982,14 +2221,21 @@
         /* ignore */
       }
     }
-    S.exportURL = URL.createObjectURL(res.blob);
+    S.exportURL = null;
+    try {
+      S.exportURL = URL.createObjectURL(res.blob);
+    } catch (e) {
+      /* no object URLs: the note below still explains how to export locally */
+    }
     D.exProgress.hidden = true;
     D.exResult.hidden = false;
     D.exResult.classList.remove('is-error');
     const webm = res.container === 'webm' || /webm/i.test(res.mime || '');
     const warn = (res.warnings || []).slice(0, 4);
     D.exResult.innerHTML =
-      '<a class="btn btn-red" id="exDownload" href="' + S.exportURL + '" download="' + esc(res.filename) + '">下载 <span>DOWNLOAD</span></a>' +
+      '<div class="ex-dl">' +
+      (S.exportURL ? '<a class="btn btn-red" id="exDownload" href="' + S.exportURL + '" download="' + esc(res.filename) + '">下载 <span>DOWNLOAD</span></a>' : '') +
+      '<p class="dl-note" id="exDlNote">' + esc(DL_NOTE) + '</p></div>' +
       '<p><b>' + esc(res.filename) + '</b> · ' + fmtMB(res.bytes || res.blob.size) + ' · ' + esc(res.codec || res.mime || '') +
       (res.elapsed ? ' · 用时 ' + fmtClock(res.elapsed) : '') + '</p>' +
       (webm ? '<p class="ex-note">此浏览器无法编码 MP4，已改为导出 WebM（可用 VLC / Chrome 播放，或再转码为 MP4）。Fell back to WebM.</p>' : '') +
@@ -2180,6 +2426,7 @@
       D.fileLyrics.click();
     });
     D.btnLyricsClear.addEventListener('click', () => {
+      if (exportBusy('歌词')) return;
       D.lyricsText.value = '';
       D.lyricsText._dirty = false;
       setLyricsText('', { source: 'paste' });
@@ -2433,6 +2680,7 @@
     decorate();
     bindUI();
     bindDrop();
+    bindFontEvents();
 
     // Engine.
     if (MV.AudioEngine) {
@@ -2475,16 +2723,18 @@
     requestAnimationFrame(loop);
 
     setBusy('准备画面', 'PREPARING', null, false);
+    // Lyrics first (URL text / assets / localStorage — all quick): the first
+    // web-font subset request then already covers them (one stylesheet, not two).
+    try {
+      await autoLoadLyrics();
+    } catch (e) {
+      reportError('lyrics autoload', e);
+    }
     await prepareStage();
     if (!S.loading) hideBusy();
     if (TEST) {
       S.t = TEST_ATTRACT_T;
       S.dirty = true;
-    }
-    try {
-      await autoLoadLyrics();
-    } catch (e) {
-      reportError('lyrics autoload', e);
     }
     try {
       await autoLoadAudio();
@@ -2537,6 +2787,10 @@
       idle: S.idle,
       settings: { hud: !!setting('hud'), credits: !!setting('credits'), quality: setting('quality'), debug: !!setting('debug'), volume: setting('volume') },
       exporting: !!S.exporter,
+      locked: document.body.classList.contains('is-exporting'),
+      fonts: S.fontReport
+        ? { loaded: S.fontReport.loaded.length, failed: S.fontReport.failed.slice(), timedOut: !!S.fontReport.timedOut, chars: S.fontReport.chars, sheets: MV.fonts && MV.fonts.linkCount ? MV.fonts.linkCount() : 0 }
+        : null,
       missing: S.missing.slice(),
       stageErrors: S.stage && S.stage.errors ? Array.from(S.stage.errors.keys()) : [],
     };

@@ -9,7 +9,8 @@
  *   post.isNeutral(params) / MV.Post.isNeutral(params) → true when render() is a plain copy
  *
  * WebGL2 → WebGL1 → Canvas2D fallback. One fullscreen fragment pass samples the
- * source canvas as a texture; neutral params use a bare copy program. Every
+ * source canvas as a texture. Program choice per frame: neutral params → bare
+ * copy; glitch / invert → FULL shader; anything else → lite shader. Every
  * effect is palette-safe (red / black / white only — no hue inversion, no
  * cyan / magenta channel fringes). Parameters (all optional, missing = 0):
  *   rgbShift   px (logical 1920-wide units) — P5-style misregistration: a red-tinted
@@ -468,7 +469,9 @@
     // 'lighten', so it only shows where the frame is darker (white stays white).
     const shiftL = Math.max(0, num(P.rgbShift));
     const a = MV.smoothstep(SHIFT_EPS, 3, shiftL);
-    const useGhost = a >= 0.08; // below that a ≤ 1 px ghost is invisible anyway
+    // CPU fallback: skip the faint 1 px ghosts between beats (≈ 9 ms of full-frame
+    // blending each); the beat hits (rgbShift ≳ 1.2 px) still get the red ghost
+    const useGhost = a >= 0.25;
     let ghost = null;
     if (useGhost || gl > 0.001) ghost = tintRed(fb, src);
     if (useGhost) {

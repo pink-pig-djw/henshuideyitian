@@ -73,17 +73,18 @@ function syntheticFeatures() {
     high[i] = MV.clamp(I * (0.5 + 0.4 * MV.rand(78, i)));
     flux[i] = MV.clamp(p * I + nz);
   }
+  const phase = MV.mod(preset.downbeatPhase | 0, 4); // true downbeats = beats[phase::4]
   const onsets = [];
   beats.forEach((b, k) => {
     const I = secAt(b).intensity;
-    const down = k % 4 === 0;
+    const down = MV.mod(k - phase, 4) === 0;
     onsets.push({ t: b, s: MV.clamp((down ? 0.75 : 0.45) + 0.35 * I * MV.rand(91, k)) });
     onsets.push({ t: b + 0.3, s: 0.2 + 0.2 * MV.rand(92, k) });
   });
   const f = {
     duration: dur, sampleRate: 22050, fps, length: n, rms, low, mid, high, flux,
     onsets, kicks: beats.filter((_, k) => k % 2 === 0),
-    bpm: preset.bpm, beatsPerBar: 4, beats: beats.slice(), downbeats: beats.filter((_, k) => k % 4 === 0),
+    bpm: preset.bpm, beatsPerBar: 4, beats: beats.slice(), downbeats: beats.filter((_, k) => MV.mod(k - phase, 4) === 0), downbeatPhase: phase,
     sections: preset.sections.map((s) => Object.assign({}, s, { scenes: s.scenes && s.scenes.slice() })),
     novelty: new Float32Array(0), source: 'computed', presetId: null, presetOffset: 0, presetConfidence: 0,
   };
@@ -166,12 +167,19 @@ function suite(label, dir, o = {}) {
   }
   check(`${label}: scene cues sorted / contiguous / from section lists`, sorted && contiguous && inList && sc[0].cut === 0 && sc[0].start === 0, `${sc.length} cues`);
   check(`${label}: no consecutive identical scene+variant`, dupes === 0, `dupes=${dupes}`);
-  let secFirst = true;
+  // A section opens with a cut at its start, or — when it starts on a pickup
+  // (lyric-aligned) — on the next downbeat, less than half a bar later.
+  let secFirst = true, delayed = [];
   S.forEach((s) => {
     const first = sc.find((c) => c.section === s.index);
-    if (!first || Math.abs(first.cut - s.start) > 1e-9) secFirst = false;
+    if (!first || Math.abs(first.cut - s.cut) > 1e-9) secFirst = false;
+    else if (Math.abs(s.cut - s.start) > 1e-9) {
+      const di = MV.lowerIndex(dir.downbeats, s.cut + 1e-6);
+      if (!(s.cut > s.start && s.cut - s.start <= dir.barLen * 0.5 && di >= 0 && Math.abs(dir.downbeats[di] - s.cut) < 1e-9)) secFirst = false;
+      delayed.push(`${s.name}@${f3(s.start)}→${f3(s.cut)}`);
+    }
   });
-  check(`${label}: every section opens with a cut at its start`, secFirst);
+  check(`${label}: every section opens with a cut at its start (pickup starts: next downbeat)`, secFirst, delayed.join(' ') || undefined);
 
   // bar-mode cuts on downbeats, spaced switchBars bars
   let barOk = true, barDetail = '';
@@ -198,6 +206,38 @@ function suite(label, dir, o = {}) {
     }
   }
   check(`${label}: in-section cuts every switchBars bars`, spaceOk, spaceDetail || undefined);
+
+  // ---- true downbeats (preset downbeatPhase 3 → beats[3::4])
+  if (o.downbeats) {
+    const R = o.downbeats;
+    const nearest = (t) => {
+      const i = MV.lowerIndex(R, t);
+      let d = Infinity;
+      for (const k of [i, i + 1]) if (k >= 0 && k < R.length) d = Math.min(d, Math.abs(R[k] - t));
+      return d;
+    };
+    let same = D.length === R.length;
+    for (let i = 0; same && i < R.length; i++) if (Math.abs(D[i] - R[i]) > 1e-3) same = false;
+    check(`${label}: director bars = true downbeats`, same, `${D.length} vs ${R.length}, first ${f3(D[0])} vs ${f3(R[0])}`);
+    let worstCut = 0, worstEnd = 0, n = 0, endDetail = '';
+    for (let i = 1; i < sc.length; i++) {
+      const c = sc[i];
+      if (c.k !== 0) continue;
+      n++;
+      worstCut = Math.max(worstCut, nearest(c.cut));
+      if (c.transition) {
+        const e = nearest(c.transition.end);
+        if (e > worstEnd) {
+          worstEnd = e;
+          endDetail = `${S[c.section].name}@${f3(c.cut)} ${c.transition.name} ends ${f3(c.transition.end)}`;
+        }
+      }
+    }
+    check(`${label}: section cuts on true downbeats`, n > 0 && worstCut < 1e-3, `${n} section starts, worst |cut − downbeat| ${f3(worstCut)} s`);
+    check(`${label}: section-start transitions end within ±0.2 s of a downbeat`, worstEnd <= 0.2, `worst ${f3(worstEnd)} s ${endDetail}`);
+    const wrong = sc.filter((c) => c.k > 0 && S[c.section].switchOn !== 'phrase' && nearest(c.cut) > 1e-3).length;
+    check(`${label}: bar-mode switches on true downbeats`, wrong === 0, `off-bar=${wrong}`);
+  }
 
   // transitions
   let trOk = true, trDetail = '';
@@ -259,13 +299,26 @@ function suite(label, dir, o = {}) {
   check(`${label}: glitch spikes only in pre/build/climax`, cues.glitches.every((g) => /pre|build|climax/.test(secOf(g.t).kind)), `${cues.glitches.length} spikes`);
   check(`${label}: frame / flash accents only in choruses`, byKind('frame').concat(byKind('flash')).every((a) => /chorus|climax/.test(secOf(a.t).kind)), `frame=${byKind('frame').length} flash=${byKind('flash').length}`);
   check(`${label}: speedlines only at intensity ≥ 0.7`, byKind('speedlines').every((a) => dir.intensityAt(a.t) >= 0.7), `${byKind('speedlines').length}`);
-  const secStarts = acc.filter((a) => (a.kind === 'ink' || a.kind === 'shards') && S.some((s) => Math.abs(s.start - a.t) < 0.1));
+  const secStarts = acc.filter((a) => (a.kind === 'ink' || a.kind === 'shards') && S.some((s) => Math.abs(s.cut - a.t) < 0.1));
   check(`${label}: ink / shards at section starts`, secStarts.length >= S.length - 2, `${secStarts.length} of ${S.length - 1}`);
   if (o.lyrics) {
     const lat = [];
     cues.lyrics.forEach((c) => c.line.phrases.forEach((p) => p.latin && lat.push(p.start)));
     const ok = lat.every((t) => acc.some((a) => a.kind === 'stars' && Math.abs(a.t - t) < 1e-6) && acc.some((a) => a.kind === 'ring' && Math.abs(a.t - t) < 1e-6));
     check(`${label}: stars + ring at every Latin phrase`, lat.length > 0 && ok, `${lat.length} Latin phrases`);
+  }
+  {
+    const L = cues.lyrics;
+    const vis = (a) => L.filter((c) => Math.min(a.t + a.dur, c.showEnd) - Math.max(a.t, c.showStart) > 0.05);
+    const big = acc.filter((a) => a.kind === 'stars' || a.kind === 'speedlines');
+    const bad = big.filter((a) => {
+      const v = vis(a);
+      if (!v.length) return !!a.avoid;
+      if (!a.avoid || a.avoid.mode !== (a.kind === 'stars' ? 'away' : 'focus')) return true;
+      return !a.avoid.lines.length || a.avoid.lines.length > 2 || !a.avoid.lines.every((x) => v.some((c) => c.line === x.line && c.style === x.style));
+    });
+    const withAvoid = big.filter((a) => a.avoid).length;
+    check(`${label}: stars / speedlines over lyrics carry avoid info`, bad.length === 0, `${withAvoid}/${big.length} with avoid, bad=${bad.length}`);
   }
   const title = byKind('title')[0];
   if (o.title !== false) {
@@ -343,7 +396,9 @@ function suite(label, dir, o = {}) {
   const buildMs = msSince(t0);
   const sum = dir.summary();
   check('build < 50 ms', buildMs < 50, `${f3(buildMs)} ms ${JSON.stringify(sum)}`);
-  suite('synthetic', dir, { lyrics: true });
+  const trueDown = preset.beats.filter((_, k) => MV.mod(k - (preset.downbeatPhase | 0), 4) === 0);
+  check('preset: true downbeats = beats[downbeatPhase::4]', (preset.downbeatPhase | 0) === 3 && features.downbeats.length === trueDown.length && features.downbeats.every((d, i) => Math.abs(d - trueDown[i]) < 1e-3), `phase=${preset.downbeatPhase} first=${f3(features.downbeats[0])}`);
+  suite('synthetic', dir, { lyrics: true, downbeats: features.downbeats });
 
   // ---- specific timing expectations on the real preset
   const sc = dir.cues.scenes;
@@ -351,12 +406,14 @@ function suite(label, dir, o = {}) {
   const wantHook = [71.48, 76.28, 81.06];
   check('hook switches on phrase starts (snapped to beat within 80 ms)', hookCuts.length === 3 && hookCuts.every((c, i) => Math.abs(c - wantHook[i]) < 0.09), hookCuts.map(f3).join(','));
   const introCues = sc.filter((c) => dir.sections[c.section].kind === 'intro');
-  check('intro: 2-bar switching (cut at first-beat + 2 bars)', introCues.length === 2 && Math.abs(introCues[1].cut - preset.beats[8]) < 1e-6, introCues.map((c) => `${c.name}@${f3(c.cut)}`).join(' '));
+  // the intro opens with a pickup (beats 0–2); bars start on beats[3::4] → cut 2 bars after the first true downbeat
+  check('intro: 2-bar switching (cut 2 bars after the first true downbeat)', introCues.length === 2 && Math.abs(introCues[1].cut - trueDown[2]) < 1e-6, introCues.map((c) => `${c.name}@${f3(c.cut)}`).join(' '));
   const outroCues = sc.filter((c) => dir.sections[c.section].kind === 'outro');
   check('outro: single scene cue (one-scene list)', outroCues.length === 1 && outroCues[0].name === 'starfield');
-  const chorusIn = sc.find((c) => Math.abs(c.cut - 46.324) < 1e-3);
-  check('chorus entrance has a strong transition ~0.25 s lead', chorusIn && chorusIn.transition && MV.Director.TRANSITIONS.strong.includes(chorusIn.transition.name), chorusIn && chorusIn.transition ? `${chorusIn.transition.name} ${f3(chorusIn.transition.start)}..${f3(chorusIn.transition.end)}` : 'none');
-  const bridgeIn = sc.find((c) => Math.abs(c.cut - 106.324) < 1e-3);
+  const secStart = (kind) => preset.sections.find((x) => x.kind === kind).start;
+  const chorusIn = sc.find((c) => Math.abs(c.cut - secStart('chorus')) < 1e-3);
+  check('chorus entrance: strong transition landing just after the downbeat', chorusIn && chorusIn.transition && MV.Director.TRANSITIONS.strong.includes(chorusIn.transition.name) && chorusIn.transition.end - chorusIn.cut <= 0.2 && chorusIn.cut - chorusIn.transition.start >= 0.2, chorusIn && chorusIn.transition ? `${chorusIn.transition.name} ${f3(chorusIn.transition.start)}..${f3(chorusIn.transition.end)} cut ${f3(chorusIn.cut)}` : 'none');
+  const bridgeIn = sc.find((c) => Math.abs(c.cut - secStart('bridge')) < 1e-3);
   check('bridge entrance (quiet) is a soft transition', bridgeIn && bridgeIn.transition && MV.Director.TRANSITIONS.soft.includes(bridgeIn.transition.name), bridgeIn && bridgeIn.transition ? bridgeIn.transition.name : 'none');
   const showers = dir.cues.accents.filter((a) => a.kind === 'stars' && a.data && a.data.shower);
   const inHeld = showers.filter((a) => a.t >= 187.7 && a.t <= 196.6).length;
@@ -384,15 +441,21 @@ function suite(label, dir, o = {}) {
   check('lt.out ramps over the last 0.35 s', l2 && Math.abs(l2.lt.out - 0.5) < 1e-6, l2 ? `out=${f3(l2.lt.out)}` : 'none');
   check('line style passed through', st1.lyrics.every((l) => l.style === l.line.style), st1.lyrics.map((l) => l.style).join(','));
 
-  // intensity cross-fade at a boundary
-  const b = 46.324;
+  // intensity cross-fade at a boundary (pre → chorus)
+  const ci = preset.sections.findIndex((x) => x.kind === 'chorus');
+  const b = preset.sections[ci].start, Ia = preset.sections[ci - 1].intensity, Ib = preset.sections[ci].intensity;
   const iMid = dir.intensityAt(b), iA = dir.intensityAt(b - 0.5), iB = dir.intensityAt(b + 0.5);
-  check('intensity cross-fades ±0.5 s at boundaries', Math.abs(iA - 0.6) < 1e-9 && Math.abs(iB - 0.85) < 1e-9 && Math.abs(iMid - 0.725) < 1e-6, `${f3(iA)} → ${f3(iMid)} → ${f3(iB)}`);
+  check('intensity cross-fades ±0.5 s at boundaries', Math.abs(iA - Ia) < 1e-9 && Math.abs(iB - Ib) < 1e-9 && Math.abs(iMid - (Ia + Ib) / 2) < 1e-6, `${f3(iA)} → ${f3(iMid)} → ${f3(iB)}`);
   // env.section / beat
+  const cs = preset.sections[ci];
   const e1 = dir.evaluate(50).env;
-  check('env.section + beat info at 50 s', e1.section.kind === 'chorus' && e1.section.index === 4 && Math.abs(e1.section.progress - (50 - 46.324) / (66.5 - 46.324)) < 1e-6 && e1.beat.period > 0.55 && e1.beat.period < 0.65, `beat ${e1.beat.index}.${e1.beat.beatInBar} pulse=${f3(e1.beat.pulse)}`);
-  const e2 = dir.evaluate(preset.beats[48]).env; // a downbeat
-  check('downbeat → beatInBar 0, barPulse 1', e2.beat.beatInBar === 0 && e2.beat.barPulse > 0.99, `bib=${e2.beat.beatInBar} bp=${f3(e2.beat.barPulse)}`);
+  check('env.section + beat info at 50 s', e1.section.kind === 'chorus' && e1.section.index === ci && Math.abs(e1.section.progress - (50 - cs.start) / (cs.end - cs.start)) < 1e-6 && e1.beat.period > 0.55 && e1.beat.period < 0.65, `beat ${e1.beat.index}.${e1.beat.beatInBar} pulse=${f3(e1.beat.pulse)}`);
+  const e2 = dir.evaluate(trueDown[12]).env; // a true downbeat
+  check('true downbeat → beatInBar 0, barPulse 1', e2.beat.beatInBar === 0 && e2.beat.barPulse > 0.99, `bib=${e2.beat.beatInBar} bp=${f3(e2.beat.barPulse)}`);
+  const e3 = dir.evaluate(preset.beats[48]).env; // beats[0::4] is beat 2 of the bar with phase 3
+  check('beats[0::4] are not bar starts (phase 3)', e3.beat.beatInBar === MV.mod(48 - 3, 4) && e3.beat.barPulse < 0.5, `bib=${e3.beat.beatInBar}`);
+  const e4 = dir.evaluate(preset.beats[1] + 0.05).env; // pickup before the first bar
+  check('pickup beats before the first true downbeat: beatInBar 2', e4.beat.beatInBar === 2 && Math.abs(e4.beat.downbeatTime - (preset.beats[0] - (preset.beats[1] - preset.beats[0]))) < 1e-6, `bib=${e4.beat.beatInBar} down=${f3(e4.beat.downbeatTime)}`);
 
   // ---- determinism: same t → same state regardless of call order
   const ser = (st) => JSON.stringify(st, (k, v) => (k === 'line' ? v.id : v));
@@ -474,7 +537,22 @@ function suite(label, dir, o = {}) {
     }
     check(`robust: ${name}`, ok, info);
   }
-  suite('preset-only', new MV.Director({ preset, track }), { lyrics: true });
+  suite('preset-only', new MV.Director({ preset, track }), { lyrics: true, downbeats: trueDown });
+  // off-grid section starts (≤ 0.15 s) snap onto the downbeat
+  {
+    const onBar = (t) => trueDown.some((d) => Math.abs(d - t) < 1e-6);
+    const f2 = Object.assign({}, features, { sections: features.sections.map((x, i) => Object.assign({}, x, { start: i && onBar(x.start) ? x.start + (i % 2 ? 0.09 : -0.07) : x.start })) });
+    const d2 = new MV.Director({ features: f2, track, preset });
+    const moved = features.sections.filter((x, i) => i > 0 && onBar(x.start)).length;
+    const off = d2.sections.filter((x, i) => i > 0 && Math.abs(x.start - features.sections[i].start) > 1e-6).length;
+    check('section starts ≤ 0.15 s off the grid snap onto the true downbeat', moved >= 8 && off === 0 && d2.sections.length === features.sections.length, `perturbed=${moved} unsnapped=${off}`);
+  }
+  // phase / downbeat disagreement: the explicit downbeat list wins
+  {
+    const f3b = Object.assign({}, features, { downbeatPhase: 0 });
+    const d3 = new MV.Director({ features: f3b, track, preset });
+    check('explicit downbeats win over a disagreeing downbeatPhase', d3.F.downbeatPhase === 3 && d3.evaluate(trueDown[20] + 0.01).env.beat.beatInBar === 0, `phase=${d3.F.downbeatPhase}`);
+  }
 
   // ---- registered subsets: unknown scene / transition names are dropped
   {
@@ -527,7 +605,7 @@ function suite(label, dir, o = {}) {
       const tr = MV.Lyrics.parse(placeholder, { preset, features });
       const d = new MV.Director({ features, track: tr, preset });
       check('lyrics.js placeholder track → director lyric cues', d.cues.lyrics.length === tr.lines.length && tr.lines.length >= 10, `${tr.source} lines=${tr.lines.length}`);
-      suite('lyrics.js-placeholder', d, { lyrics: true });
+      suite('lyrics.js-placeholder', d, { lyrics: true, downbeats: features.downbeats });
     } catch (e) {
       check('lyrics.js placeholder integration', false, e.message);
     }
@@ -547,7 +625,7 @@ function suite(label, dir, o = {}) {
     const dR = new MV.Director({ features: realFeatures, track, preset });
     const sR = dR.summary();
     check('real WAV: glitch spikes from strong onsets exist', sR.glitches > 3, `glitches=${sR.glitches}`);
-    suite('real-wav', dR, { lyrics: true });
+    suite('real-wav', dR, { lyrics: true, downbeats: realFeatures.downbeats });
     // evaluate timing with real envelopes
     const n2 = 20000;
     const a2 = hr();
@@ -576,7 +654,7 @@ function suite(label, dir, o = {}) {
       const d = new MV.Director({ features: realFeatures || features, track: tr, preset });
       const ids = d.cues.lyrics.map((c) => c.line.n);
       check(`${env}: 12 displayed lines (1-5, 11-17), none of 6-10`, ids.length === 12 && !ids.some((n) => n >= 6 && n <= 10), `n=${ids.join(',')} source=${tr.source}`);
-      suite(env, d, { lyrics: true });
+      suite(env, d, { lyrics: true, downbeats: (realFeatures || features).downbeats });
     }
   }
 

@@ -453,45 +453,173 @@
   }
 
   /* ------------------------------------------------------------------ */
-  /* Phrase helpers                                                      */
+  /* Phrase boundaries                                                   */
   /* ------------------------------------------------------------------ */
-  // Map a preset char offset `at` (into a display string of length L0) onto
-  // the pasted text `arr`. keySpace: the texts share the same lyric key, so
-  // map by key-char ratio (robust to extra/missing spaces or punctuation).
-  function mapOffset(at, L0, arr, keySpace) {
-    const L = arr.length;
-    if (at <= 0 || L <= 1) return 0;
-    let target;
-    if (keySpace) {
-      const idx = [];
-      for (let i = 0; i < L; i++) if (isKeyChar(arr[i])) idx.push(i);
-      const K = idx.length;
-      target = K ? idx[clamp(Math.round((at * K) / Math.max(1, L0)), 0, K - 1)] : Math.round((at * L) / L0);
-    } else {
-      target = Math.round((at * L) / Math.max(1, L0));
-    }
-    target = clamp(target, 1, L - 1);
-    // Near-identical text (typo): stay close to the ratio target; clearly
-    // different text: snap to a word start within ±12 %.
-    const dL = Math.abs(L - L0);
-    const win = keySpace ? 1 : dL <= 3 ? Math.max(1, dL) : Math.max(2, Math.round(L * 0.12));
-    let best = -1;
-    let bestD = Infinity;
-    for (let i = Math.max(1, target - win); i <= Math.min(L - 1, target + win); i++) {
+  // A phrase boundary is the index of the first glyph of a phrase. Candidate
+  // boundaries get a penalty by kind (in "chars of distance" units):
+  //   after a space ............................ 0 (1.2 between two Latin words of a mixed line,
+  //                                                  so an English tail stays one phrase)
+  //   after punctuation / before an opener ..... 0.4
+  //   script change (CJK ↔ Latin, no space) .... 0.6
+  //   between two CJK glyphs ................... `inner`: 1.5 when the text is the same lyric
+  //                                               (same key, or a typo-sized length change),
+  //                                               4 for a different text (order fallback)
+  //   before small kana, ー, closing marks ..... +6
+  //   inside a Latin word ...................... never ("Keep mov|ing")
+  const TOK_RE = /[\x21-\x7E‘’“”０-９Ａ-Ｚａ-ｚ]/;
+  const isTok = (ch) => !!ch && TOK_RE.test(ch);
+  const BREAK_AFTER = '、。，．！？…‥・：；」』）】〕〉》〗〙〜～';
+  const OPEN_MARKS = '「『（【〔〈《〖〘“‘(';
+  const NO_START = '、。，．！？…‥・：；」』）】〕〉》〗〙ー々ゝゞヽヾぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ〜～';
+  const INNER_SAME = 1.5;
+  const INNER_OTHER = 4;
+  const SKIP_COST = 1000; // a boundary is only dropped when no valid position is left
+
+  function prevGlyph(arr, i) {
+    for (let j = i - 1; j >= 0; j--) if (arr[j] !== ' ') return arr[j];
+    return null;
+  }
+  function boundaryPenalty(arr, i, mixed, inner) {
+    const c = arr[i];
+    const p = arr[i - 1];
+    if (c == null || c === ' ' || p == null) return Infinity;
+    const noStart = NO_START.indexOf(c) >= 0 ? 6 : 0;
+    if (p === ' ') return (mixed && isTok(c) && isTok(prevGlyph(arr, i)) ? 1.2 : 0) + noStart;
+    if (isTok(p) && isTok(c)) return Infinity; // inside a Latin word / token
+    if (BREAK_AFTER.indexOf(p) >= 0 || OPEN_MARKS.indexOf(c) >= 0) return 0.4 + noStart;
+    if (isTok(p) !== isTok(c)) return 0.6 + noStart;
+    return inner + noStart;
+  }
+
+  /**
+   * Place one boundary per target (sorted char positions) inside (lo, hi) of
+   * `arr`: strictly increasing, never inside a Latin word, each minimising
+   * |pos − target| + boundaryPenalty (dynamic programming over all
+   * candidates, so several boundaries never collapse onto the same space).
+   * A boundary that cannot be placed is returned as −1.
+   * @returns {number[]} positions (−1 = dropped), one per target
+   */
+  function placeBoundaries(arr, lo, hi, targets, inner) {
+    const K = targets.length;
+    if (!K) return [];
+    let hasTok = false;
+    let hasOther = false;
+    for (let i = lo; i < hi; i++) {
       if (arr[i] === ' ') continue;
-      const wordStart = arr[i - 1] === ' ';
-      const scriptChange = !wordStart && isLatinCh(arr[i]) !== isLatinCh(arr[i - 1]);
-      if (!wordStart && !scriptChange) continue;
-      const d = Math.abs(i - target) + (wordStart ? 0 : 0.5) + (i < target ? 0.01 : 0);
-      if (d < bestD) {
-        bestD = d;
-        best = i;
+      if (isTok(arr[i])) hasTok = true;
+      else hasOther = true;
+    }
+    const mixed = hasTok && hasOther;
+    const cand = [];
+    const pen = [];
+    for (let i = lo + 1; i < hi; i++) {
+      const v = boundaryPenalty(arr, i, mixed, inner);
+      if (v < Infinity) {
+        cand.push(i);
+        pen.push(v);
       }
     }
-    if (best >= 0) return best;
-    let i = target;
-    while (i < L && arr[i] === ' ') i++;
-    return i < L ? i : target;
+    const M = cand.length;
+    // State s = 0: no candidate used yet; s = j + 1: last boundary at cand[j].
+    let cost = new Float64Array(M + 1).fill(Infinity);
+    cost[0] = 0;
+    const from = []; // from[k][s'] = previous state, or −1 − s for "skipped"
+    for (let k = 0; k < K; k++) {
+      const next = new Float64Array(M + 1).fill(Infinity);
+      const fr = new Int32Array(M + 1);
+      for (let s = 0; s <= M; s++) {
+        if (cost[s] + SKIP_COST < next[s]) {
+          next[s] = cost[s] + SKIP_COST;
+          fr[s] = -1 - s;
+        }
+      }
+      let bestPrev = Infinity;
+      let bestS = 0;
+      for (let j = 0; j < M; j++) {
+        if (cost[j] < bestPrev) {
+          bestPrev = cost[j];
+          bestS = j;
+        }
+        if (bestPrev === Infinity) continue;
+        // tiny bias to the left keeps ties deterministic and phrases compact
+        const c = bestPrev + Math.abs(cand[j] - targets[k]) + pen[j] + (cand[j] > targets[k] ? 1e-3 : 0);
+        if (c < next[j + 1]) {
+          next[j + 1] = c;
+          fr[j + 1] = bestS;
+        }
+      }
+      from.push(fr);
+      cost = next;
+    }
+    let s = 0;
+    for (let q = 1; q <= M; q++) if (cost[q] < cost[s]) s = q;
+    const out = new Array(K).fill(-1);
+    for (let k = K - 1; k >= 0; k--) {
+      const f = from[k][s];
+      if (f < 0) continue; // skipped: state unchanged
+      out[k] = cand[s - 1];
+      s = f;
+    }
+    return out;
+  }
+
+  /**
+   * Map preset phrase offsets `ats` (code points into a display string of
+   * length L0; ats[0] = line start) onto the pasted text `arr`.
+   * keyed: the texts share the lyric key → map by key-char ratio (robust to
+   * extra / missing spaces or punctuation); otherwise (order fallback, a
+   * different text) map by length ratio and snap to spaces / punctuation.
+   * @returns {{pos:number[], keep:number[]}} kept phrase indices and their starts
+   */
+  function mapPhraseStarts(ats, L0, arr, keyed) {
+    const L = arr.length;
+    let first = 0;
+    while (first < L && arr[first] === ' ') first++;
+    const pos = [first];
+    const keep = [0];
+    if (ats.length <= 1 || first >= L - 1) return { pos, keep };
+    let idx = null;
+    if (keyed) {
+      idx = [];
+      for (let i = 0; i < L; i++) if (isKeyChar(arr[i])) idx.push(i);
+    }
+    const targets = [];
+    for (let k = 1; k < ats.length; k++) {
+      const at = Math.max(0, ats[k] || 0);
+      let t;
+      if (idx && idx.length) t = idx[clamp(Math.round((at * idx.length) / Math.max(1, L0)), 0, idx.length - 1)];
+      else t = (at * L) / Math.max(1, L0);
+      targets.push(clamp(t, first + 1, L - 1));
+    }
+    // Same lyric (key match or a typo-sized length change): the targets are
+    // close to the authored boundaries, so only nearby spaces win; a different
+    // text (order fallback) snaps to spaces / punctuation much more eagerly.
+    const same = keyed || Math.abs(L - L0) <= Math.max(2, Math.round(0.08 * L0));
+    const placed = placeBoundaries(arr, first, L, targets, same ? INNER_SAME : INNER_OTHER);
+    placed.forEach((p, k) => {
+      if (p < 0) return;
+      pos.push(p);
+      keep.push(k + 1);
+    });
+    return { pos, keep };
+  }
+
+  // Single-offset form (tests / tools): where would preset offset `at` land?
+  function mapOffset(at, L0, arr, keySpace) {
+    if (!(at > 0) || arr.length <= 1) return 0;
+    const r = mapPhraseStarts([0, at], L0, arr, !!keySpace);
+    return r.pos.length > 1 ? r.pos[1] : r.pos[0];
+  }
+
+  // True when preset offsets can be used verbatim on `arr` (same text length,
+  // every boundary on a glyph and outside Latin words).
+  function exactOffsetsOK(ats, arr) {
+    for (let k = 1; k < ats.length; k++) {
+      const a = ats[k];
+      if (!(a > 0 && a < arr.length) || !(a > ats[k - 1])) return false;
+      if (boundaryPenalty(arr, a, false, INNER_SAME) === Infinity) return false;
+    }
+    return true;
   }
 
   // Turn char positions + times into phrase specs covering all non-space chars.
@@ -538,11 +666,17 @@
       }
       const n = s.charEnd - s.charStart;
       if (!latin && n > 12) {
+        // Long unspaced run: ~8-glyph parts, cut at punctuation / script
+        // changes when one is near, never inside a Latin word.
         const parts = Math.ceil(n / 8);
-        for (let k = 0; k < parts; k++) {
-          const a = s.charStart + Math.round((n * k) / parts);
-          const b = s.charStart + Math.round((n * (k + 1)) / parts);
-          chunks.push({ cs: a, ce: b, n: b - a, latin: false });
+        const targets = [];
+        for (let k = 1; k < parts; k++) targets.push(s.charStart + (n * k) / parts);
+        const cuts = placeBoundaries(arr, s.charStart, s.charEnd, targets, 2).filter((c) => c >= 0);
+        const edges = [s.charStart].concat(cuts, [s.charEnd]);
+        for (let k = 0; k + 1 < edges.length; k++) {
+          const a = edges[k];
+          const b = edges[k + 1];
+          chunks.push({ cs: a, ce: b, n: b - a, latin: isLatin(arr.slice(a, b).join('')) });
         }
       } else {
         chunks.push({ cs: s.charStart, ce: s.charEnd, n, latin });
@@ -660,8 +794,14 @@
       const arr = chars(text);
       const src = p.phrases && p.phrases.length ? p.phrases : [{ at: 0, t: fin(p.t, 0) }];
       const L0 = p.len || arr.length;
-      const pos = arr.length === L0 ? src.map((s) => s.at) : src.map((s) => mapOffset(s.at, L0, arr, how !== 'order'));
-      const phrases = phrasesFromPositions(arr, pos, src.map((s) => s.t + offset));
+      const ats = src.map((s) => s.at);
+      // Same text → the authored offsets verbatim. Otherwise map them (key
+      // ratio / length ratio) and snap to spaces / punctuation — never inside
+      // a Latin word; a boundary with no valid spot merges two phrases.
+      const map = how !== 'order' && arr.length === L0 && exactOffsetsOK(ats, arr)
+        ? { pos: ats, keep: ats.map((_, k) => k) }
+        : mapPhraseStarts(ats, L0, arr, how !== 'order');
+      const phrases = phrasesFromPositions(arr, map.pos, map.keep.map((k) => src[k].t + offset));
       if (!phrases.length) {
         missing++;
         continue;
@@ -895,12 +1035,16 @@
   /* ------------------------------------------------------------------ */
   /* Auto mode                                                           */
   /* ------------------------------------------------------------------ */
-  function downbeatsFor(opts, preset, offset) {
+  // Downbeats on the base timeline (features, else the preset grid); the
+  // caller adds the offset. Honours downbeatPhase (index of the bar-starting
+  // beat, e.g. the preset's true downbeats are beats[3::4]).
+  function downbeatsFor(opts, preset) {
     const f = opts.features;
     if (f && Array.isArray(f.downbeats) && f.downbeats.length) return f.downbeats;
     const bpb = (f && f.beatsPerBar) || (preset && preset.beatsPerBar) || 4;
-    if (f && Array.isArray(f.beats) && f.beats.length) return f.beats.filter((_, i) => i % bpb === 0);
-    if (preset && Array.isArray(preset.beats)) return preset.beats.filter((_, i) => i % bpb === 0).map((t) => t + offset);
+    const bars = (beats, phase) => beats.filter((_, i) => (((i - phase) % bpb) + bpb) % bpb === 0);
+    if (f && Array.isArray(f.beats) && f.beats.length) return bars(f.beats, fin(f.downbeatPhase, 0) | 0);
+    if (preset && Array.isArray(preset.beats)) return bars(preset.beats, fin(preset.downbeatPhase, 0) | 0);
     return [];
   }
 
@@ -916,9 +1060,12 @@
       return track;
     }
     const f = opts.features;
-    const sections = sectionsFor(opts, preset, offset);
+    // Timing is laid out on the base timeline (the features grid when given,
+    // else the preset grid); `offset` is then added to every time, exactly as
+    // in preset / LRC mode.
+    const sections = sectionsFor(opts, preset, 0);
     const dur = (f && f.duration) || (preset && preset.match && preset.match.duration) || null;
-    const downbeats = downbeatsFor(opts, preset, offset);
+    const downbeats = downbeatsFor(opts, preset);
     let spans = sections.filter((s) => !NON_VOCAL.has(s.kind) && s.end - s.start >= 3).map((s) => ({ a: s.start, b: s.end }));
     if (!spans.length && dur) {
       const pad = Math.min(8, dur * 0.06);
@@ -980,7 +1127,7 @@
         ends.push(en);
       });
     } else {
-      let t = 8 + offset;
+      let t = 8;
       Q.forEach((e, i) => {
         if (i > 0 && e.stanzaBreak) t += 2.5;
         const d = clamp(0.35 * nonSpaceCount(chars(e.display)) + 1.4, 2, 8);
@@ -991,16 +1138,17 @@
     }
     for (let i = 1; i < starts.length; i++) if (starts[i] < starts[i - 1] + 0.6) starts[i] = starts[i - 1] + 0.6;
     Q.forEach((e, i) => {
-      const s = starts[i];
-      let en = ends[i];
-      if (i + 1 < starts.length) en = Math.min(en, starts[i + 1] - 0.1);
+      const s = starts[i] + offset;
+      let en = ends[i] + offset;
+      if (i + 1 < starts.length) en = Math.min(en, starts[i + 1] + offset - 0.1);
       en = Math.max(en, s + 0.8);
       const arr = chars(e.display);
       track.lines.push(buildLine({ n: i + 1, id: 'L' + (i + 1), text: e.display, key: e.key, phrases: distributePhrases(arr, s, en), end: en }));
     });
     track.matched = { total: Q.length, matched: 0, skipped: 0 };
     track.warnings.push('未匹配到时间预设：已按字数自动分配时间，建议用同步编辑器校准 (auto timing)');
-    return finishTrack(track, sections, f);
+    const shifted = offset ? sections.map((x) => Object.assign({}, x, { start: x.start + offset, end: x.end + offset })) : sections;
+    return finishTrack(track, shifted, f);
   }
 
   /* ------------------------------------------------------------------ */
@@ -1195,6 +1343,6 @@
     parse, assignStyles, toLRC, isMetaLine, activeLines, withTimes,
     clone, refresh, detectMode,
     // exposed for tests / tools
-    _internal: { cleanRaw, isWrapped, mapOffset, computeCharTimes, fmtStamp, distributePhrases },
+    _internal: { cleanRaw, isWrapped, mapOffset, mapPhraseStarts, placeBoundaries, computeCharTimes, fmtStamp, distributePhrases },
   };
 })();

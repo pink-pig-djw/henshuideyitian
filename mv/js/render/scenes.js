@@ -4,8 +4,10 @@
  *   night-city · train · crowd · tunnel · stripes · sunburst · sky-red · shards · starfield · void
  *
  * Contract per scene:
- *   prepare(stage)       pre-renders static sprites once (skylines, windows, crowd
- *                        figures, halftone textures…). Also run lazily on first draw.
+ *   prepare(stage)       builds the static caches once (vector display lists for
+ *                        skylines / rooftops / the train interior, tight sprites
+ *                        for halftones, moons and figures). Also run lazily on
+ *                        first draw.
  *   draw(ctx, env, p)    paints the WHOLE frame opaquely in logical 1920×1080 space,
  *                        with overscan so camera zoom-out / rotation never shows an edge.
  *   p = { seed, lt, dur, variant, speed, intensity }
@@ -17,6 +19,16 @@
  *
  * Original artwork only: faceless silhouettes, generic crows, an original
  * star-slash emblem. No franchise characters, masks, logos or UI.
+ *
+ * Cultural rule: no sun-like compositions. Never red/white (or red/light) rays
+ * or wedges radiating from a centre or disc, no striped sun discs. Big round
+ * lights are always a shaded, cratered cream moon (MV.C.star); energy comes from
+ * red/black focus lines, concentric rings, halftone waves and star bursts.
+ * tools/shot-scenes.cjs checks every scene with a radial-wedge detector.
+ *
+ * Memory: large flat layers are recorded as vector ops (Recorder) and shared
+ * sprites (moons, radial halftone quadrants) are built once; MV.sceneStats()
+ * reports what the caches hold.
  */
 (function () {
   'use strict';
@@ -393,17 +405,20 @@
   }
   /**
    * Replays recorded ops. Colours starting with '@' are palette slots looked
-   * up in `pal` (one recording serves every palette of a scene).
+   * up in `pal` (one recording serves every palette of a scene); a slot the
+   * palette leaves out is skipped (e.g. a distant skyline without windows).
    */
   function playOps(ctx, ops, pal) {
     let stroked = false;
     for (let i = 0; i < ops.length; i++) {
       const op = ops[i];
+      const col = op.k < 2 && pal && op.s.charCodeAt(0) === 64 ? pal[op.s] : op.s;
+      if (op.k < 2 && !col) continue;
       if (op.k === 0) {
-        ctx.fillStyle = pal && op.s.charCodeAt(0) === 64 ? pal[op.s] : op.s;
+        ctx.fillStyle = col;
         ctx.fill(op.p, op.r);
       } else if (op.k === 1) {
-        ctx.strokeStyle = pal && op.s.charCodeAt(0) === 64 ? pal[op.s] : op.s;
+        ctx.strokeStyle = col;
         ctx.lineWidth = op.w;
         ctx.lineCap = op.cap;
         ctx.lineJoin = op.join;
@@ -420,8 +435,11 @@
   }
   // Rasterises a recorded, horizontally tiling strip into a seamless sprite
   // (for dense strips, e.g. thousands of tiny windows, a blit is cheaper).
-  function stripSprite(L, h, pal) {
-    return sprite(L.w, h, (c) => {
+  // k scales the strip (k·L.w must be an integer for a seamless tile).
+  function stripSprite(L, h, pal, k) {
+    k = k || 1;
+    return sprite(Math.round(L.w * k), Math.round(h * k), (c) => {
+      c.scale(k, k);
       c.translate(-L.w, 0);
       playOps(c, L.ops, pal);
       c.translate(L.w, 0);
@@ -430,11 +448,14 @@
   }
   // Horizontally tiling recorded strip (L = { ops, w, over }): same placement as
   // drawStrip; the previous tile is included when its overhang is on screen.
-  function drawStripOps(ctx, L, off, y, pal) {
-    const sw = L.w;
-    let x = stripX0(off, sw);
-    if (x + (L.over || 0) > -OVS) x -= sw;
-    for (; x < W + OVS; x += sw) {
+  // k: the caller has scaled the context by k (screen bounds are divided by k).
+  function drawStripOps(ctx, L, off, y, pal, k) {
+    const sw = L.w, lo = -OVS / (k || 1), hi = (W + OVS) / (k || 1);
+    let x = -mod(off, sw);
+    while (x > lo) x -= sw;
+    x = Math.round(x);
+    if (x + (L.over || 0) > lo) x -= sw;
+    for (; x < hi; x += sw) {
       ctx.translate(x, y);
       playOps(ctx, L.ops, pal);
       ctx.translate(-x, -y);
@@ -885,36 +906,48 @@
   }
 
   /* ---------------- Halftone texture helper ----------------------------- */
-  function halftoneSprite(w, h, o) {
-    return sprite(w, h, (c) => D.halftone(c, 0, 0, w, h, o));
-  }
   // One quadrant of a radial halftone (45° screen anchored on the centre, so
-  // it mirrors seamlessly), dots shrinking to nothing at QUAD.R. One sprite per
-  // colour serves every radial and corner halftone (shards, stripes, void),
-  // drawn mirrored as needed — a quarter of the memory of a full disc.
+  // it mirrors seamlessly), dots shrinking to nothing at QUAD.R — a quarter of
+  // the memory of a full disc. (sx, sy) bakes the direction the quadrant points
+  // to (the centre sits in the matching corner), so corner halftones are plain
+  // blits; the full radial halftone mirrors the (+, +) one. Shared by shards,
+  // stripes and void.
   const QUAD = { R: 842, cell: 24 };
   const quadCache = new Map();
-  function radialQuad(color) {
-    if (!quadCache.has(color)) {
-      quadCache.set(color, attributed('shared', () => sprite(QUAD.R, QUAD.R, (c) => {
+  function radialQuad(color, sx, sy) {
+    sx = sx < 0 ? -1 : 1;
+    sy = sy < 0 ? -1 : 1;
+    const key = color + '|' + sx + '|' + sy;
+    if (!quadCache.has(key)) {
+      const R = QUAD.R;
+      const cv = attributed('shared', () => sprite(R, R, (c) => {
         const h = QUAD.cell / Math.SQRT2;
         c.fillStyle = color;
         c.beginPath();
-        for (let m = 0; m * h < QUAD.R + QUAD.cell; m++) {
-          for (let n = m & 1; n * h < QUAD.R + QUAD.cell; n += 2) {
+        for (let m = 0; m * h < R + QUAD.cell; m++) {
+          for (let n = m & 1; n * h < R + QUAD.cell; n += 2) {
             const x = m * h, y = n * h;
-            const r = 1.05 * clamp(1 - Math.hypot(x, y) / QUAD.R) * QUAD.cell * 0.62;
+            const r = 1.05 * clamp(1 - Math.hypot(x, y) / R) * QUAD.cell * 0.62;
             if (r < 0.4) continue;
-            c.moveTo(x + r, y);
-            c.arc(x, y, r, 0, TAU);
+            const px = sx > 0 ? x : R - x, py = sy > 0 ? y : R - y;
+            c.moveTo(px + r, py);
+            c.arc(px, py, r, 0, TAU);
           }
         }
         c.fill();
-      })));
+      }));
+      cv.qsx = sx;
+      cv.qsy = sy;
+      quadCache.set(key, cv);
     }
-    return quadCache.get(color);
+    return quadCache.get(key);
   }
-  // Draws the quadrant with its centre at (x, y), pointing along (sx, sy) = ±1.
+  // A baked quadrant with its centre at (x, y): a plain blit.
+  function drawCorner(ctx, img, x, y) {
+    ctx.drawImage(img, Math.round(x) - (img.qsx < 0 ? QUAD.R : 0), Math.round(y) - (img.qsy < 0 ? QUAD.R : 0));
+  }
+  // Draws the (+, +) quadrant with its centre at (x, y), mirrored to point
+  // along (sx, sy) = ±1.
   function drawQuad(ctx, img, x, y, sx, sy) {
     x = Math.round(x);
     y = Math.round(y);
@@ -925,6 +958,15 @@
     ctx.save();
     ctx.translate(x, y);
     ctx.scale(sx, sy);
+    // With an unscaled, unrotated target a mirror at integer offsets is an
+    // exact pixel copy: skip filtering (much cheaper in software raster). Any
+    // camera zoom / rotation keeps normal smoothing.
+    try {
+      const m = ctx.getTransform();
+      if (!m.b && !m.c && Math.abs(m.a) === 1 && Math.abs(m.d) === 1 && m.e === Math.round(m.e) && m.f === Math.round(m.f)) ctx.imageSmoothingEnabled = false;
+    } catch (e) {
+      /* getTransform unsupported: keep smoothing */
+    }
     ctx.drawImage(img, 0, 0);
     ctx.restore();
   }
@@ -946,10 +988,6 @@
     'skyred-top': [24, 700, C.black, (v) => 1.1 * Math.pow(clamp(1 - v * 1.15), 1.5)],
     'skyred-hz': [14, 300, C.redHot, (v) => 0.9 * v],
     'train-sky': [14, 560, C.navy, (v) => 0.25 + 0.85 * v],
-    'sb-top-k': [24, 560, C.black, (v) => 1.1 * Math.pow(clamp(1 - v * 1.1), 1.6)],
-    'sb-bot-k': [24, 560, C.black, (v) => 1.1 * Math.pow(clamp(v * 1.1 - 0.1), 1.6)],
-    'sb-top-r': [24, 560, C.redDeep, (v) => 1.05 * Math.pow(clamp(1 - v * 1.1), 1.6)],
-    'sb-bot-r': [24, 560, C.redDeep, (v) => 1.05 * Math.pow(clamp(v * 1.1 - 0.1), 1.6)],
   };
   const rampTiles = new Map();
   const rampPats = new WeakMap();
@@ -1762,20 +1800,22 @@
     return walkerCache.get(key);
   }
   /**
-   * Walker sprite at height h (facing +x): rim pass (offset rim, −0.6·rim) and
-   * body pass, tightly cropped. Returns { cv, ax, ay } (feet at ax, ay).
+   * Walker sprite at height h facing dir (±1): rim pass (offset +rim, −0.6·rim
+   * in screen space) and body pass, tightly cropped. Returns { cv, ax, ay }
+   * (feet at ax, ay).
    */
-  function walkerSprite(type, pose, h, rim, body, rimCol) {
+  function walkerSprite(type, pose, h, dir, rim, body, rimCol) {
     const sh = walkerShape(type, pose), b = sh.b;
     const pad = 3;
-    const x0 = Math.floor(b[0] * h) - pad, x1 = Math.ceil(b[2] * h + rim) + pad;
+    const bx0 = dir > 0 ? b[0] : -b[2], bx1 = dir > 0 ? b[2] : -b[0];
+    const x0 = Math.floor(bx0 * h) - pad, x1 = Math.ceil(bx1 * h + rim) + pad;
     const y0 = Math.floor(b[1] * h - rim * 0.6) - pad, y1 = Math.ceil(b[3] * h) + pad;
     const ax = -x0, ay = -y0;
     const cv = sprite(x1 - x0, y1 - y0, (c) => {
       for (const ps of [[rimCol, rim, -rim * 0.6], [body, 0, 0]]) {
         c.save();
         c.translate(ax + ps[1], ay + ps[2]);
-        c.scale(h, h);
+        c.scale(h * dir, h);
         c.fillStyle = ps[0];
         c.fill(sh.path);
         c.restore();
@@ -1840,17 +1880,18 @@
     return studentCache;
   }
   // The static part of the student (rim light, silhouette, red tailoring
-  // details) as one sprite at height h, lit from the left (mirrored when the
-  // wind blows the other way). Feet centre at (ax, ay).
-  function studentSprite(h, rimCol) {
+  // details) as one sprite at height h; dir = −1 is the mirror image (used
+  // when the wind blows the other way). Feet centre at (ax, ay).
+  function studentSprite(h, rimCol, dir) {
     const S = studentShapes(), b = S.bounds;
     const pad = 14;
-    const x0 = Math.floor(b[0] * h) - pad - 8, x1 = Math.ceil(b[2] * h) + pad;
+    const bx0 = dir > 0 ? b[0] : -b[2], bx1 = dir > 0 ? b[2] : -b[0];
+    const x0 = Math.floor(bx0 * h) - pad - 8, x1 = Math.ceil(bx1 * h) + pad + 8;
     const y0 = Math.floor(b[1] * h) - pad - 4, y1 = Math.ceil(b[3] * h) + pad;
     const ax = -x0, ay = -y0, px = 1 / h;
     const cv = sprite(x1 - x0, y1 - y0, (c) => {
       c.translate(ax, ay);
-      c.scale(h, h);
+      c.scale(h * dir, h);
       c.lineJoin = 'round';
       c.lineCap = 'round';
       // red rim light: a thin outline all round (backlit by the moon) plus a
@@ -1875,12 +1916,13 @@
   }
   // One scarf tail: a long ribbon streaming down-wind with a travelling wave and
   // a swallow-tail tip (reads as cloth, not as a limb). Unit space.
-  function scarfTail(ctx, tau, len, ph, x0, y0, wind, droop, w0) {
+  function scarfTail(ctx, tau, len, ph, x0, y0, wind, droop, w0, amp) {
     const n = 12, up = [], lo = [];
     const ca = Math.cos(droop), sa = Math.sin(droop);
+    const A = amp == null ? 1 : amp;
     for (let i = 0; i <= n; i++) {
       const s = i / n;
-      const wave = (0.006 + 0.04 * s) * Math.sin(tau * 7 - s * 9 + ph) + 0.005 * Math.sin(tau * 15 + s * 16 + ph);
+      const wave = A * ((0.006 + 0.04 * s) * Math.sin(tau * 7 - s * 9 + ph) + 0.005 * Math.sin(tau * 15 + s * 16 + ph));
       const x = x0 + s * len * ca - wave * sa;
       const y = y0 + s * len * sa + wave * ca;
       const w = w0 * (1 - s * 0.3);
@@ -1917,14 +1959,15 @@
       ctx.fill();
       ctx.stroke();
     }
+    const sp = spr[wind > 0 ? 0 : 1];
     ctx.save();
-    ctx.scale(wind * px, px);
-    ctx.drawImage(spr.cv, -spr.ax, -spr.ay);
+    ctx.scale(px, px);
+    ctx.drawImage(sp.cv, -sp.ax, -sp.ay);
     ctx.restore();
     // scarf wrap + short front end swinging on the beat
     ctx.save();
     ctx.scale(wind, 1);
-    scarfTail(ctx, tau * 0.6, 0.15, 1.3, 0.036, -0.81, 1, 1.35 + 0.08 * Math.sin(tau * 2.3) - 0.1 * B.pulse, 0.038);
+    scarfTail(ctx, tau * 0.6, 0.13, 1.3, 0.03, -0.806, 1, 1.45 + 0.06 * Math.sin(tau * 2.3) - 0.08 * B.pulse, 0.036, 0.25);
     ctx.fill();
     ctx.stroke();
     ctx.restore();
@@ -1944,27 +1987,29 @@
     { h: 540, foot: 972, v: 100, dir: 1, n: 7, rim: 6 },
     { h: 1060, foot: 1420, v: 420, dir: -1, n: 2, rim: 10, margin: 1400 },
   ];
-  const CROWD_SKY = {
-    red: { '@body': C.blood, '@w0': C.redDeep, '@w1': C.red },
-    night: { '@body': mix(C.navy, C.night, 0.6), '@w0': mix(C.navy, C.star, 0.3), '@w1': C.redDeep },
-  };
-  const CROWD_H = 540; // shared walker sprite height (row 2; row 1 is drawn scaled down)
+  const CROWD_SKY = { k: 0.45, red: { '@body': C.blood }, night: { '@body': mix(C.navy, C.night, 0.6) } };
   function buildCrowd() {
     rampTile('crowd-red');
     rampTile('crowd-night');
+    // distant city behind the crossing: the shared far-skyline geometry at 0.45
+    // scale, silhouettes only (its palettes leave out the window slots)
     const K = { moon: { red: moonSprite('red'), navy: moonSprite('navy') }, far: sharedSkyline('far') };
     // walker sprites: one shared set (black / red rim) for rows 1–2 and the far
     // row in two depth tints; row 3 (huge, ≤ 2 walkers) is drawn as vector paths
-    K.near = [];
-    K.farRed = [];
+    // every row gets sprites at its exact size and direction (plain blits);
+    // row 3 (huge, ≤ 2 walkers) is drawn as vector paths
+    K.rows = [];
     K.farNight = [];
-    const r0 = CROWD_ROWS[0];
-    for (let type = 0; type < 6; type++) {
-      K.near[type] = [0, 1].map((pose) => walkerSprite(type, pose, CROWD_H, CROWD_ROWS[2].rim, C.black, C.red));
-      K.farRed[type] = [0, 1].map((pose) => walkerSprite(type, pose, r0.h, r0.rim, C.blood, C.redHot));
-      K.farNight[type] = [0, 1].map((pose) => walkerSprite(type, pose, r0.h, r0.rim, C.night, C.redDeep));
+    for (let ri = 0; ri < 3; ri++) {
+      const row = CROWD_ROWS[ri];
+      K.rows[ri] = [];
+      if (ri === 0) K.farNight = [];
+      for (let type = 0; type < 6; type++) {
+        K.rows[ri][type] = [0, 1].map((pose) => walkerSprite(type, pose, row.h, row.dir, row.rim, row.tint ? C.blood : C.black, row.tint ? C.redHot : C.red));
+        if (ri === 0) K.farNight[type] = [0, 1].map((pose) => walkerSprite(type, pose, row.h, row.dir, row.rim, C.night, C.redDeep));
+      }
     }
-    K.student = studentSprite(660, C.red);
+    K.student = [studentSprite(660, C.red, 1), studentSprite(660, C.red, -1)];
     return K;
   }
   function drawCrowdRow(ctx, K, ri, tau, p, B, I, q, speedK, night) {
@@ -1972,8 +2017,7 @@
     const M = row.margin || 320;
     const span = W + 2 * M;
     const n = ri === 3 ? (I > 0.6 ? 2 : 1) : Math.max(1, Math.round(row.n * (0.55 + 0.6 * I) * (ri < 2 ? q : 1)));
-    const set = ri === 0 ? (night ? K.farNight : K.farRed) : K.near;
-    const k0 = row.h / (ri === 0 ? row.h : CROWD_H);
+    const set = ri === 0 && night ? K.farNight : K.rows[ri];
     for (let k = 0; k < n; k++) {
       const x0 = (k / n) * span + srand(p.seed, ri * 50 + k, 1) * (span / n) * 0.35;
       const x = Math.round(mod(x0 + row.dir * row.v * speedK * tau, span) - M);
@@ -1995,15 +2039,7 @@
         continue;
       }
       const spr = set[type][pose];
-      if (k0 === 1 && row.dir > 0) {
-        ctx.drawImage(spr.cv, x - spr.ax, row.foot + bob - spr.ay);
-      } else {
-        ctx.save();
-        ctx.translate(x, row.foot + bob);
-        ctx.scale(k0 * row.dir, k0);
-        ctx.drawImage(spr.cv, -spr.ax, -spr.ay);
-        ctx.restore();
-      }
+      ctx.drawImage(spr.cv, x - spr.ax, row.foot + bob - spr.ay);
     }
   }
   function drawCrowd(ctx, env, p, K) {
@@ -2030,11 +2066,12 @@
     circle(ctx, px, discY, dr + 58 + 30 * B.barPulse);
     ctx.stroke();
     drawMoon(ctx, K.moon[night ? 'navy' : 'red'], px, discY);
-    // distant city skyline (shared vector geometry, 0.6 scale, slow drift)
+    // distant city skyline (slow drift)
+    const kS = CROWD_SKY.k;
     ctx.save();
-    ctx.translate(0, 716 - NC.farH * 0.45);
-    ctx.scale(0.45, 0.45);
-    drawStripOps(ctx, K.far, tau * 12, 0, night ? CROWD_SKY.night : CROWD_SKY.red);
+    ctx.translate(0, Math.round(716 - NC.farH * kS));
+    ctx.scale(kS, kS);
+    drawStripOps(ctx, K.far, tau * 12, 0, night ? CROWD_SKY.night : CROWD_SKY.red, kS);
     ctx.restore();
     // ground + zebra crossing in gentle perspective
     ctx.fillStyle = C.black;
@@ -2192,8 +2229,8 @@
   function buildStripes() {
     const K = {};
     K.seqs = [0, 1, 2, 3].map((i) => stripeSeq(i + 1));
-    K.htBL = radialQuad(C.black);
-    K.htTR = radialQuad(C.white);
+    K.htBL = radialQuad(C.black, 1, -1);
+    K.htTR = radialQuad(C.white, -1, 1);
     return K;
   }
   function chainPath(ctx, x0, y0, x1, y1, link, lw, phase) {
@@ -2283,7 +2320,7 @@
       ctx.fillStyle = S.ink;
       ctx.beginPath();
       const pitch = 26;
-      for (let k = 0, hx = 0; hx < P.w; k++, hx += pitch) {
+      for (let hx = 0; hx < P.w; hx += pitch) {
         const u = P.side < 0 ? hx / P.w : 1 - hx / P.w;
         const bw = pitch * 0.9 * Math.pow(u, 1.3);
         if (bw < 1) continue;
@@ -2359,8 +2396,8 @@
     ctx.restore();
     // halftone gradients (corners)
     const drift = Math.round(20 * Math.sin(tau * 0.4));
-    drawQuad(ctx, K.htBL, -OV + 60 + drift, H + OV - 40, 1, -1);
-    drawQuad(ctx, K.htTR, W + OV - 60 - drift, -OV + 40, -1, 1);
+    drawCorner(ctx, K.htBL, -OV + 60 + drift, H + OV - 40);
+    drawCorner(ctx, K.htTR, W + OV - 60 - drift, -OV + 40);
     // chain across the frame
     if (v % 2 === 0) {
       ctx.strokeStyle = C.black;
@@ -2392,13 +2429,12 @@
   // and a black star-burst carrying the emblem. White only as thin outlines and
   // small particles.
   const SB_SCHEMES = [
-    // bg, focus lines, deep lines, rings, halftone wave, ramps, outer burst, burst outline, inner burst, emblem
-    { bg: C.red, line: C.black, deep: C.redDeep, ring: C.black, wave: C.black, ramp: 'k', outer: C.black, edge: C.white, shadow: C.blood, inner: C.redHot, em: { star: C.black, slash: C.white, outline: C.black, gap: C.redHot, lw: 10 }, spark: C.star },
-    { bg: C.black, line: C.red, deep: C.blood, ring: C.red, wave: C.red, ramp: 'r', outer: C.red, edge: C.star, shadow: C.blood, inner: C.black, em: { star: C.red, slash: C.white, outline: C.black, gap: C.black, lw: 10 }, spark: C.star },
-    { bg: C.blood, line: C.black, deep: C.red, ring: C.red, wave: C.black, ramp: 'k', outer: C.black, edge: C.red, shadow: C.ink, inner: C.red, em: { star: C.black, slash: C.white, outline: C.black, gap: C.red, lw: 10 }, spark: C.star },
+    // bg, focus lines, deep lines, rings, halftone wave, outer burst, burst outline, inner burst, emblem
+    { bg: C.red, line: C.black, deep: C.redDeep, ring: C.black, wave: C.black, outer: C.black, edge: C.white, shadow: C.blood, inner: C.redHot, em: { star: C.black, slash: C.white, outline: C.black, gap: C.redHot, lw: 10 }, spark: C.star },
+    { bg: C.black, line: C.red, deep: C.blood, ring: C.red, wave: C.red, outer: C.red, edge: C.star, shadow: C.blood, inner: C.black, em: { star: C.red, slash: C.white, outline: C.black, gap: C.black, lw: 10 }, spark: C.star },
+    { bg: C.blood, line: C.black, deep: C.red, ring: C.red, wave: C.black, outer: C.black, edge: C.red, shadow: C.ink, inner: C.red, em: { star: C.black, slash: C.white, outline: C.black, gap: C.red, lw: 10 }, spark: C.star },
   ];
   function buildSunburst() {
-    for (const k of ['sb-top-k', 'sb-bot-k', 'sb-top-r', 'sb-bot-r']) rampTile(k);
     return {};
   }
   // Tapered focus lines: thin triangles from far outside the frame towards
@@ -2451,27 +2487,24 @@
     const tau = p.lt * p.speed + rand(p.seed, 1) * 100;
     const side = rand(p.seed, 2) < 0.5 ? -1 : 1;
     const cx = Math.round(W * (0.5 + side * (0.17 + 0.1 * rand(p.seed, 7)))), cy = Math.round(H * (0.4 + 0.18 * rand(p.seed, 3)));
-    const SK = window.__sbSkip || {};
     fillAll(ctx, S.bg);
-    if (!SK.ramp) fillRamp(ctx, 'sb-top-' + S.ramp, -OV);
-    fillRamp(ctx, 'sb-bot-' + S.ramp, H + OV - RAMPS['sb-bot-k'][1]);
     // focus lines: a deep-tone layer and the main layer; they re-ink per beat
     // (per bar when calm) and the clear zone breathes with the pulse
     const epoch = I > 0.6 ? B.index : B.bar;
     const breathe = 1 - 0.14 * B.pulse * (0.4 + I);
     const rot = tau * 0.03 * side;
-    if (!SK.lines) focusLines(ctx, cx, cy, Math.round((12 + 8 * I) * q), p.seed + 5, epoch, rot + 0.07, 540 * breathe, 28, S.deep);
-    if (!SK.lines) focusLines(ctx, cx, cy, Math.round((50 + 42 * I) * q), p.seed, epoch, rot, 430 * breathe, 15, S.line);
+    focusLines(ctx, cx, cy, Math.round((10 + 6 * I) * q), p.seed + 5, epoch, rot + 0.07, 540 * breathe, 30, S.deep);
+    focusLines(ctx, cx, cy, Math.round((42 + 34 * I) * q), p.seed, epoch, rot, 430 * breathe, 16, S.line);
     // concentric jagged shock rings drifting outward over each bar
-    if (!SK.rings) shockRings(ctx, cx, cy, B, p.seed + 3, { color: S.ring, r0: 500, gap: 170, n: 2, kick: 24, amp: 18, tooth: 70, lw: 11, rot: tau * 0.04, alpha: 0.5 + 0.4 * I });
+    shockRings(ctx, cx, cy, B, p.seed + 3, { color: S.ring, r0: 500, gap: 170, n: 2, kick: 24, amp: 18, tooth: 70, lw: 11, rot: tau * 0.04, alpha: 0.5 + 0.4 * I });
     // halftone shock wave released on every downbeat
     const age = B.sinceDownbeat;
-    if (age < 0.9 && !SK.wave) {
+    if (age < 0.9) {
       const k = age / 0.9;
       halftoneWave(ctx, cx, cy, 300 + E.outCubic(k) * (900 + 500 * I), 26, 11 * (1 - k) * (0.6 + 0.4 * I), S.wave);
     }
     // particles streaming out (small cream sparks + black chips)
-    if (I > 0.35 && !SK.sparks) {
+    if (I > 0.35) {
       const n = Math.round((18 + 36 * I) * q);
       for (let pass = 0; pass < 2; pass++) {
         ctx.fillStyle = pass ? C.ink : S.spark;
@@ -2703,7 +2736,11 @@
     const radii = [0, 80, 190, 340, 540, 800, 1120, 1520];
     const rad = angles.map(() => radii.map((R, j) => (j === 0 ? 0 : R * r.range(0.8, 1.2))));
     const shards = [];
+    // Colours by ring: the impact core is dark (black / red), light panes only
+    // further out — the web must never read as red/white wedges around a centre.
     const cols = [[C.red, 0.42], [C.white, 0.24], [C.black, 0.34]];
+    const colsCore = [[C.black, 0.55], [C.red, 0.45]];
+    let ring = 0;
     const push = (pts) => {
       let gx = 0, gy = 0;
       for (const q of pts) { gx += q[0]; gy += q[1]; }
@@ -2712,7 +2749,7 @@
       const i = shards.length;
       shards.push({
         gx, gy, d: Math.hypot(gx, gy), pts: loc,
-        col: pickW(cols, r.next()),
+        col: ring === 0 ? (r.next(), C.black) : pickW(ring < 3 ? colsCore : cols, r.next()),
         k1: r.next(), k2: r.next(), k3: r.next(), k4: r.next(), k5: r.next(), i,
       });
     };
@@ -2721,6 +2758,7 @@
       const a0 = angles[a], a1 = a === nA - 1 ? angles[0] + TAU : angles[b];
       const P = (ang, rr) => [Math.cos(ang) * rr, Math.sin(ang) * rr];
       for (let j = 0; j < radii.length - 1; j++) {
+        ring = j;
         const q0 = P(a0, rad[a][j]), q1 = P(a1, rad[b][j]), q2 = P(a1, rad[b][j + 1]), q3 = P(a0, rad[a][j + 1]);
         if (j === 0) push([[0, 0], q2, q3]);
         else if (r.chance(0.35)) {
@@ -2747,7 +2785,7 @@
     const shards = K.fr[p.seed % K.fr.length];
     fillAll(ctx, bg);
     drawRadialHalftone(ctx, scheme === 0 ? K.htRed : K.htBlack, ix, iy);
-    const amt = (b) => (mod(b, 4) === 0 ? 0.05 : 0.4 + 0.6 * rand(p.seed, b, 3)) * (0.35 + 0.65 * I);
+    const amt = (b) => (mod(b, 4) === 0 ? 0.14 : 0.4 + 0.6 * rand(p.seed, b, 3)) * (0.35 + 0.65 * I);
     const kSnap = E.outBack(clamp(B.sinceDownbeat / 0.28), 1.4);
     const A = lerp(amt(B.bar - 1), amt(B.bar), kSnap) + 0.1 * B.barPhase * (0.3 + I);
     const list = K.buf;
@@ -2932,7 +2970,6 @@
     });
     // The static rooftop silhouette is baked into the sky sprite (one blit per
     // frame, no second full-width layer); per-frame sky elements stay above it.
-    attributed('starfield', () => 0);
     K.constellations = new Map();
     return K;
   }
@@ -2943,8 +2980,6 @@
     const r = MV.rng(seed);
     const y0 = H + OV - h;
     const Y = (screenY) => screenY - y0;
-    // layers: 0 silhouettes · 1 shop signs · 2 sign details · 3 windows · 4 mullions · 5 pole + wires
-    c.layer = 0;
     c.fillStyle = C.black;
     const peopleX = w * 0.57;
     const wins = [];
@@ -3015,13 +3050,10 @@
         // low shop with a lit sign
         const bw = r.range(160, 240), top = Y(r.range(950, 990));
         c.fillRect(x, top, bw, h - top);
-        c.layer = 1;
         c.fillStyle = r.chance(0.5) ? C.red : C.star;
         c.fillRect(x + 20, top + 16, bw - 40, 22);
-        c.layer = 2;
         c.fillStyle = C.black;
         c.fillRect(x + 30 + (bw - 60) * 0.3, top + 16, 6, 22);
-        c.layer = 0;
         x += bw + r.range(0, 16);
       } else {
         // tree clump
@@ -3035,15 +3067,12 @@
       }
     }
     for (const wv of wins) {
-      c.layer = 3;
       c.fillStyle = r.chance(0.2) ? C.red : r.chance(0.5) ? C.yellow : C.star;
       c.fillRect(Math.round(wv[0]), Math.round(wv[1]), 18, 22);
-      c.layer = 4;
       c.fillStyle = C.black;
       c.fillRect(Math.round(wv[0]) + 8, Math.round(wv[1]), 2, 22);
     }
     // utility pole + sagging wires across the frame
-    c.layer = 5;
     c.fillStyle = C.black;
     const px = w * 0.17, ptop = Y(620);
     poleShape(c, px, ptop, h, 0.85);
@@ -3296,7 +3325,7 @@
     K.blobs = [0, 1].map((i) => sprite(400, 400, (c) => paintInk(c, 200, 200, 150, 6110 + i, i ? C.redDeep : C.blood, C.blood)));
     K.scraps = [];
     for (let k = 0; k < 8; k++) K.scraps.push(scrapSprite(k, 6200 + k));
-    K.dots = radialQuad(C.white); // drawn faint (≈ C.gray on black)
+    K.dots = radialQuad(C.white, -1, 1); // shared with stripes; drawn faint (≈ C.gray on black)
     return K;
   }
   function drawVoid(ctx, env, p, K) {
@@ -3304,7 +3333,7 @@
     const tau = p.lt * p.speed + rand(p.seed, 1) * 300;
     fillAll(ctx, C.black);
     ctx.globalAlpha = 0.1;
-    drawQuad(ctx, K.dots, W + OV, H + OV, -1, -1);
+    drawCorner(ctx, K.dots, W + OV, -OV);
     ctx.globalAlpha = 1;
     // drifting ink fog (integer blits, no rotation: cheap in software raster too)
     ctx.globalAlpha = 0.62 + 0.18 * I + 0.1 * B.barPulse;
@@ -3359,6 +3388,17 @@
   /* ================================================================== */
   /* Registration                                                        */
   /* ================================================================== */
+  /**
+   * Dev/test hook: memory held by the prepared scene caches — sprite bytes and
+   * recorded vector segments per scene ('shared' = caches used by several).
+   * @returns {{ bytes: object, segs: object, totalBytes: number }}
+   */
+  MV.sceneStats = function () {
+    let total = 0;
+    for (const k in MEM.bytes) total += MEM.bytes[k];
+    return { bytes: Object.assign({}, MEM.bytes), segs: Object.assign({}, MEM.segs), totalBytes: total };
+  };
+
   defineScene('night-city', { build: buildNightCity, draw: drawNightCity });
   defineScene('train', { build: buildTrain, draw: drawTrain });
   defineScene('crowd', { build: buildCrowd, draw: drawCrowd });

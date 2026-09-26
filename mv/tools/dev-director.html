@@ -240,14 +240,15 @@
       high[i] = MV.clamp(I * (0.5 + 0.4 * MV.rand(78, i)));
       flux[i] = MV.clamp(p * I + nz);
     }
+    const phase = MV.mod(preset.downbeatPhase | 0, 4); // true downbeats = beats[phase::4]
     const onsets = [];
     beats.forEach((b, k) => {
       const I = secAt(b).intensity;
-      onsets.push({ t: b, s: MV.clamp((k % 4 === 0 ? 0.75 : 0.45) + 0.35 * I * MV.rand(91, k)) });
+      onsets.push({ t: b, s: MV.clamp((MV.mod(k - phase, 4) === 0 ? 0.75 : 0.45) + 0.35 * I * MV.rand(91, k)) });
     });
     const f = {
       duration: dur, sampleRate: 22050, fps, length: n, rms, low, mid, high, flux, onsets, kicks: [],
-      bpm: preset.bpm, beatsPerBar: 4, beats: beats.slice(), downbeats: beats.filter((_, k) => k % 4 === 0),
+      bpm: preset.bpm, beatsPerBar: 4, beats: beats.slice(), downbeats: beats.filter((_, k) => MV.mod(k - phase, 4) === 0), downbeatPhase: phase,
       sections: preset.sections.map((s) => Object.assign({}, s)), novelty: new Float32Array(0),
       source: 'computed', presetId: null, presetOffset: 0, presetConfidence: 0,
     };

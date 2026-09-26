@@ -343,6 +343,129 @@ console.log('--- invented preset: fallbacks ---');
   check('warnings never contain lyric text', [t3, t4, t5, t6, t7, t8].every((t) => noTextInWarnings(t, FIX_TEXT)));
 }
 
+console.log('--- order fallback: phrase boundaries on word / punctuation edges ---');
+{
+  const tok = (ch) => /[\x21-\x7E‘’“”]/.test(ch || '');
+  // Index of the first boundary that cuts a Latin word ("Keep mov|ing"), or -1.
+  const midWord = (line) => {
+    for (let k = 1; k < line.phrases.length; k++) {
+      const cs = line.phrases[k].charStart;
+      if (tok(line.chars[cs - 1]) && tok(line.chars[cs])) return cs;
+    }
+    return -1;
+  };
+  // Line 5 of the invented preset (Latin tail) replaced by a different invented
+  // line whose long English words straddle the ratio targets → order mapping.
+  const variants = [
+    '明日へ Keeepmovingonward tonight',
+    '走れ Keep moving on and on tonight',
+    '遠くまで 今 Foreverandever',
+    '今夜こそ 走り出す Neverstopdreaming',
+    'Paper stars keep shining tonight',
+  ];
+  let bad = 0;
+  let fb = 0;
+  let tailOK = 0;
+  const detail = [];
+  variants.forEach((v) => {
+    const lines = FIX_TEXT.slice();
+    lines[4] = v; // the chorus line is sung twice: replace both copies
+    lines[8] = v;
+    const tr = L.parse(pasteOf(lines), { preset: TEST_PRESET });
+    const l5 = tr.lines.find((l) => l.n === 5);
+    if (l5.match === 'order') fb++;
+    const m = midWord(l5);
+    if (m >= 0 || lineInvariants(tr).length) {
+      bad++;
+      detail.push(v.length + ':' + m);
+    }
+    // the mapped phrases keep preset times (merged phrases keep the earlier one)
+    if (l5.phrases.every((p) => TEST_PRESET.lines[4].phrases.some((q) => near(q.t, p.start)))) tailOK++;
+  });
+  check('order fallback: never splits a Latin word', bad === 0 && fb === variants.length, `bad=${bad} order=${fb} ${detail.join(' ')}`);
+  check('order fallback: phrase times come from the preset line', tailOK === variants.length, tailOK + '/' + variants.length);
+
+  // Property test on the mapper itself: invented mixed lines × random offsets.
+  const I = L._internal;
+  const words = ['夜明け', 'の', '駅で', '君を', '待つ', '、', 'Keep', 'moving', 'on', 'tonight', 'paper', 'stars', '今夜', '走り出す', 'we’re', '「さよなら」', 'ー', 'forever'];
+  const rng = MV.rng(4242);
+  let invalid = 0;
+  let collapsed = 0;
+  let runs = 0;
+  for (let it = 0; it < 400; it++) {
+    const n = rng.int(2, 9);
+    let s = '';
+    for (let w = 0; w < n; w++) s += (w && rng.chance(0.7) ? ' ' : '') + rng.pick(words);
+    const arr = Array.from(MV.canonDisplay(s));
+    const L0 = Math.max(4, arr.length + rng.int(-8, 8));
+    const K = rng.int(2, 5);
+    const ats = [0];
+    for (let k = 1; k < K; k++) ats.push(Math.min(L0 - 1, ats[k - 1] + rng.int(1, Math.max(1, Math.floor(L0 / K) + 2))));
+    for (const keyed of [false, true]) {
+      runs++;
+      const r = I.mapPhraseStarts(ats, L0, arr, keyed);
+      for (let k = 1; k < r.pos.length; k++) {
+        const p = r.pos[k];
+        if (!(p > r.pos[k - 1]) || arr[p] === ' ' || (tok(arr[p - 1]) && tok(arr[p]))) invalid++;
+      }
+      if (r.keep.some((k, i) => i && !(k > r.keep[i - 1]))) invalid++;
+      if (r.pos.length < K) collapsed++;
+    }
+  }
+  check('mapPhraseStarts: boundaries increasing, on glyphs, never inside Latin words', invalid === 0, `invalid=${invalid} runs=${runs} merged=${collapsed}`);
+  // Spaces win over nearby CJK positions for a different text; the same text
+  // (key match) keeps a CJK boundary that is right on target.
+  const arr = Array.from('あいうえおかき くけこさしす');
+  // (preset text 20 glyphs → clearly a different text; ratio target 5.2)
+  check('order fallback: snaps to a space within 4 glyphs', I.mapPhraseStarts([0, 8], 20, arr, false).pos[1] === 8, I.mapPhraseStarts([0, 8], 20, arr, false).pos.join(','));
+  // (typo-sized length change → same lyric: stays on target)
+  check('order fallback, typo-sized change: keeps the on-target boundary', I.mapPhraseStarts([0, 5], 14, arr, false).pos[1] === 5, I.mapPhraseStarts([0, 5], 14, arr, false).pos.join(','));
+  check('keyed mapping: keeps an on-target CJK boundary', I.mapPhraseStarts([0, 5], arr.length, arr, true).pos[1] === 5, I.mapPhraseStarts([0, 5], arr.length, arr, true).pos.join(','));
+  check('order fallback: punctuation boundary preferred over mid-run CJK', I.mapPhraseStarts([0, 6], 12, Array.from('あいうえ、おかきくけこさ'), false).pos[1] === 5);
+  // A Latin tail that cannot be split at a space merges instead of cutting a word.
+  const one = I.mapPhraseStarts([0, 3, 6, 9], 12, Array.from('Keepmovingon'), false);
+  check('all-Latin single word: phrases merge, no mid-word cut', one.pos.length === 1, one.pos.join(','));
+  // Auto / LRC chunking of long unspaced runs never cuts a Latin word either.
+  const ch = I.distributePhrases(Array.from('君と見たあの星空をいつまでもForeverandever'), 0, 10);
+  const chArr = Array.from('君と見たあの星空をいつまでもForeverandever');
+  check('distributePhrases: long mixed run cut at the script change, not inside the word', ch.length >= 2 && ch.every((p) => !(tok(chArr[p.charStart - 1]) && tok(chArr[p.charStart]))), ch.map((p) => p.charStart).join(','));
+}
+
+console.log('--- auto mode: offset & bar phase ---');
+{
+  const feats = { duration: 100, sections: TEST_PRESET.sections, downbeats: Array.from({ length: 41 }, (_, i) => i * 2.5) };
+  const txt = FIX_TEXT.join('\n');
+  const a0 = L.parse(txt, { features: feats });
+  const a1 = L.parse(txt, { features: feats, offset: 1.5 });
+  const want = L.withTimes(a0, (t) => t + 1.5);
+  const err = maxTimeErr(a1, want);
+  check('auto + features: offset added to every time', a1.source === 'auto' && err < 1e-6 && near(a1.lines[0].start, a0.lines[0].start + 1.5), (err * 1000).toFixed(3) + ' ms');
+  check('auto + features: offset keeps sections / styles', a1.lines.every((l, i) => l.sectionKind === a0.lines[i].sectionKind && l.style === a0.lines[i].style));
+  const b0 = L.parse(txt, { preset: Object.assign({}, TEST_PRESET, { lines: [] }) });
+  const b1 = L.parse(txt, { preset: Object.assign({}, TEST_PRESET, { lines: [] }), offset: -0.75 });
+  check('auto + preset grid: offset added to every time', maxTimeErr(b1, L.withTimes(b0, (t) => t - 0.75)) < 1e-6);
+  const n0 = L.parse(txt, {});
+  const n1 = L.parse(txt, { offset: 2 });
+  check('auto without grid: offset added to every time', maxTimeErr(n1, L.withTimes(n0, (t) => t + 2)) < 1e-6);
+  // Grids whose bars start on beats[phase::4]; section edges on those bars.
+  const barGrid = (phase) => {
+    const down = TEST_PRESET.beats.filter((_, i) => i % 4 === phase);
+    const snap = (t) => (t <= 0 ? 0 : t >= 100 ? 100 : down.reduce((b, d) => (Math.abs(d - t) < Math.abs(b - t) ? d : b), down[0]));
+    return { down, sections: TEST_PRESET.sections.map((x) => Object.assign({}, x, { start: snap(x.start), end: snap(x.end) })) };
+  };
+  const g3 = barGrid(3);
+  const phased = Object.assign({}, TEST_PRESET, { lines: [], downbeatPhase: 3, sections: g3.sections });
+  const tp = L.parse(txt, { preset: phased });
+  const onBar = tp.lines.filter((l) => g3.down.some((d) => near(d, l.start, 1e-6))).length;
+  const onWrong = tp.lines.filter((l) => TEST_PRESET.beats.some((b, i) => i % 4 === 0 && near(b, l.start, 1e-6))).length;
+  check('auto + preset grid: snaps to true downbeats (downbeatPhase)', onBar >= tp.lines.length - 1 && onWrong === 0, `${onBar}/${tp.lines.length} on beats[3::4], ${onWrong} on beats[0::4]`);
+  const g1 = barGrid(1);
+  const fb = { duration: 100, sections: g1.sections, beats: TEST_PRESET.beats, beatsPerBar: 4, downbeatPhase: 1 };
+  const tf = L.parse(txt, { features: fb });
+  const onF = tf.lines.filter((l) => g1.down.some((d) => near(d, l.start, 1e-6))).length;
+  check('auto + features without downbeats: bars from downbeatPhase', onF >= tf.lines.length - 1, `${onF}/${tf.lines.length}`);
+}
+
 console.log('--- minimal preset (no end / t-only lines) ---');
 {
   const txt = ['一行目の架空の歌詞 そのさき', '二行目 まだ続く架空の言葉', '三行目の架空'];

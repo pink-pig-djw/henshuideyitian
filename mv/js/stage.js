@@ -8,15 +8,26 @@
  *   stage.renderFrame(t) → { ms, evalMs, state }
  *   stage.resize(scale); stage.invalidateLayouts(); stage.setDebug(on); stage.dispose();
  *
- * Frame order: scene(s) with the camera (+ overscan) → transition composite →
- * 'under' effects → lyrics (camera × 0.35 parallax) → 'over' effects → HUD →
- * [debug overlay] → MV.Post into the visible canvas (plain drawImage when
- * MV.Post is missing).
+ * Frame order: scene(s) → transition composite → camera → 'under' effects →
+ * lyrics (camera × 0.35 parallax) → 'over' effects → HUD → [debug overlay] →
+ * MV.Post into the visible canvas (plain drawImage when MV.Post is missing,
+ * disabled, or the post params are neutral on a 2D output).
  *
  * Buffers (backing size = 1920×1080 × scale; everything draws in logical
- * MV.W × MV.H space through a base transform): sceneA, sceneB (transition
- * sources) and comp (the composite handed to MV.Post). Without a transition
- * the scene paints straight into comp.
+ * MV.W × MV.H space through a base transform): sceneA, sceneB (scenes, drawn
+ * UNtransformed — every sprite blit inside a scene stays axis-aligned), mix
+ * (transition composite) and comp (the composite handed to MV.Post). The
+ * camera (shake / drift / zoom / rotation, zoomed ≥ `overscan` and enough to
+ * cover the frame) is applied ONCE, by drawing the scene (or mix) buffer into
+ * comp with the camera transform. `cameraMode: 'scene'` restores the old path
+ * (camera transform set while each scene draws) for A/B measurements.
+ *
+ * Lyric bounds: before any effect draws, env.lyricBounds is set to the
+ * screen-space AABBs of the visible lyric lines ({ x0, y0, x1, y1, id, style,
+ * alpha }, from the cached layouts + the lyric parallax). Accents carrying
+ * `avoid` (MV.Director: big stars bursts, speedlines) are handed to their
+ * effect as a copy with x / y moved off the lines ('away') or onto the sung
+ * line ('focus'); the director's accent objects are never mutated.
  *
  * Every external draw (scene / transition / effect / lyric style / HUD / post)
  * is isolated: try/catch, state reset before each call, one console warning
@@ -68,7 +79,45 @@
   }
 
   const fin = (x, d) => (typeof x === 'number' && isFinite(x) ? x : d);
+  const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
   const NO_CAM = { x: 0, y: 0, zoom: 1, rot: 0 };
+  const NEUTRAL_POST = { rgbShift: 0, glitch: 0, glitchSeed: 0, grain: 0, vignette: 0, flash: 0, redFlash: 0, invert: 0, scanlines: 0, time: 0 };
+  // Same thresholds as MV.Post.isNeutral (used when post.js predates it).
+  const num = (v) => (typeof v === 'number' && isFinite(v) ? v : 0);
+  function neutralPost(P) {
+    if (!P) return true;
+    return !(num(P.rgbShift) > 0.2 || num(P.glitch) > 1e-3 || num(P.grain) > 1e-3 || num(P.vignette) > 1e-3 ||
+      num(P.flash) > 1e-3 || num(P.redFlash) > 1e-3 || num(P.invert) > 1e-3 || num(P.scanlines) > 1e-3);
+  }
+
+  // Accent placement around lyric bounds (logical px).
+  const AWAY_MARGIN = 170; //  clearance between a stars burst centre and the text box
+  const AWAY_FRAME = { x0: 150, y0: 130, x1: W - 150, y1: H - 130 }; // burst centres stay on screen
+  // Signed distance from (px, py) to box B: > 0 outside, ≤ 0 inside.
+  function boxDist(B, px, py) {
+    const dx = Math.max(B.x0 - px, 0, px - B.x1);
+    const dy = Math.max(B.y0 - py, 0, py - B.y1);
+    if (dx > 0 || dy > 0) return Math.hypot(dx, dy);
+    return -Math.min(px - B.x0, B.x1 - px, py - B.y0, B.y1 - py);
+  }
+  // Nearest point to (x, y) at least `m` clear of box B (above / below / left /
+  // right of it, or a frame corner when the text fills the frame). Pure.
+  function placeAway(B, x, y, m) {
+    if (boxDist(B, x, y) >= m) return [x, y];
+    const F = AWAY_FRAME;
+    const cands = [[x, B.y0 - m], [x, B.y1 + m], [B.x0 - m, y], [B.x1 + m, y], [F.x0, F.y0], [F.x1, F.y0], [F.x0, F.y1], [F.x1, F.y1]];
+    let best = [x, y];
+    let bestScore = -Infinity;
+    for (const c of cands) {
+      const cx = clamp(c[0], F.x0, F.x1), cy = clamp(c[1], F.y0, F.y1);
+      const score = Math.min(boxDist(B, cx, cy), m) - 0.002 * Math.hypot(cx - x, cy - y);
+      if (score > bestScore + 1e-9) {
+        bestScore = score;
+        best = [cx, cy];
+      }
+    }
+    return best;
+  }
 
   /**
    * @param {object} [opts]
@@ -81,6 +130,9 @@
    * @param {string} [opts.postPrefer] 'auto' | 'webgl1' | '2d'
    * @param {number} [opts.parallax=0.35] camera factor applied to lyrics
    * @param {number} [opts.overscan=1.02] minimum scene overscan zoom
+   * @param {string} [opts.cameraMode='composite'] 'composite' = scenes drawn untransformed,
+   *   camera applied once when their buffer is composited; 'scene' = legacy (camera
+   *   transform set while each scene draws) — kept for A/B measurements
    */
   function Stage(opts) {
     opts = opts || {};
@@ -93,6 +145,7 @@
     this.debug = !!opts.debug;
     this.parallax = fin(opts.parallax, 0.35);
     this.overscan = Math.max(1, fin(opts.overscan, 1.02));
+    this.cameraMode = opts.cameraMode === 'scene' ? 'scene' : 'composite';
     this.usePost = opts.post !== false;
     this.postOptions = { preserveDrawingBuffer: opts.preserveDrawingBuffer !== false, prefer: opts.postPrefer || 'auto' };
     this.director = null;
@@ -104,7 +157,10 @@
     this._dirVersion = -1;
     this._adapt = [];
     this._stamps = [];
-    this.stats = { frames: 0, evalMs: 0, renderMs: 0, avgMs: 0, avgEvalMs: 0, fps: 0, scale: this.scale, quality: 1, post: 'none', downgrades: 0 };
+    this.stats = {
+      frames: 0, evalMs: 0, renderMs: 0, avgMs: 0, avgEvalMs: 0, fps: 0, scale: this.scale, quality: 1,
+      post: 'none', postDirect: 0, downgrades: 0, camera: this.cameraMode,
+    };
     this._alloc();
     this._initPost();
   }
@@ -125,6 +181,7 @@
     };
     this.sceneA = fit(this.sceneA);
     this.sceneB = fit(this.sceneB);
+    this.mix = fit(this.mix);
     this.comp = fit(this.comp);
     if (this.canvas.width !== w) this.canvas.width = w;
     if (this.canvas.height !== h) this.canvas.height = h;
@@ -235,7 +292,7 @@
   Stage.prototype.dispose = function () {
     if (this.post && this.post.dispose) this._try('post', 'dispose', () => this.post.dispose());
     this.post = null;
-    for (const b of [this.sceneA, this.sceneB, this.comp]) if (b) b.canvas.width = b.canvas.height = 1;
+    for (const b of [this.sceneA, this.sceneB, this.mix, this.comp]) if (b) b.canvas.width = b.canvas.height = 1;
     this._layouts.clear();
   };
 
@@ -287,6 +344,7 @@
     if (ctx.setLineDash) ctx.setLineDash([]);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
+    ctx.imageSmoothingEnabled = true;
     return ctx;
   };
 
@@ -320,6 +378,7 @@
       ctx.fillStyle = C.black;
       ctx.fillRect(0, 0, W, H);
     } else {
+      this._lyricBounds(st);
       this._drawScene(st);
       this._drawEffects(st, 'under');
       this._drawLyrics(st);
@@ -335,13 +394,34 @@
   };
 
   /* ---------------- scenes & transitions ---------------- */
+  /** 'composite' (default) or 'scene' (legacy per-scene camera transform). */
+  Stage.prototype.setCameraMode = function (mode) {
+    this.cameraMode = mode === 'scene' ? 'scene' : 'composite';
+    this.stats.camera = this.cameraMode;
+    return this;
+  };
+
+  // Camera transform (after the base transform): shift, rotation and a zoom
+  // of at least `overscan` that always covers the frame (no edge ever shows).
+  Stage.prototype._camera = function (ctx, cam) {
+    cam = cam || NO_CAM;
+    const cover = coverZoom(cam);
+    const z = Math.max(fin(cam.zoom, 1) * Math.max(this.overscan, cover), cover);
+    ctx.translate(W / 2 + fin(cam.x, 0), H / 2 + fin(cam.y, 0));
+    ctx.rotate(fin(cam.rot, 0));
+    ctx.scale(z, z);
+    ctx.translate(-W / 2, -H / 2);
+  };
+
   Stage.prototype._drawScene = function (st) {
     const sc = st.scene || {};
     const tr = sc.transition;
+    const once = this.cameraMode !== 'scene';
+    let src = null; // untransformed frame, composited with the camera below
     if (tr && sc.to) {
-      this._sceneInto(this.sceneA.ctx, sc.from, st);
-      this._sceneInto(this.sceneB.ctx, sc.to, st);
-      const ctx = this._begin(this.comp.ctx);
+      this._sceneInto(this.sceneA.ctx, sc.from, st, !once);
+      this._sceneInto(this.sceneB.ctx, sc.to, st, !once);
+      const ctx = this._begin((once ? this.mix : this.comp).ctx);
       const T = MV.transitions && MV.transitions.get(tr.name);
       const A = this.sceneA.canvas, B = this.sceneB.canvas;
       const cutAt = fin(tr.cutP, 0.6);
@@ -352,24 +432,31 @@
       if (!T) {
         this._err('transition-missing', tr.name);
         hardCut();
-        return;
+      } else {
+        ctx.save();
+        this._try('transition', tr.name, () => T.draw(ctx, A, B, tr.p, st.env, tr.seed), hardCut);
+        ctx.restore();
       }
-      ctx.save();
-      this._try('transition', tr.name, () => T.draw(ctx, A, B, tr.p, st.env, tr.seed), hardCut);
-      ctx.restore();
+      if (once) src = this.mix.canvas;
     } else if (sc.from) {
-      this._sceneInto(this.comp.ctx, sc.from, st);
+      if (once) {
+        this._sceneInto(this.sceneA.ctx, sc.from, st, false);
+        src = this.sceneA.canvas;
+      } else this._sceneInto(this.comp.ctx, sc.from, st, true);
+    }
+    if (src) {
+      // The one camera-transformed blit of the frame. Opaque source that
+      // covers the whole viewport → every comp pixel is rewritten.
+      const ctx = this._begin(this.comp.ctx);
+      this._camera(ctx, st.camera);
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(src, 0, 0, W, H);
     }
   };
 
-  Stage.prototype._sceneInto = function (ctx, spec, st) {
+  Stage.prototype._sceneInto = function (ctx, spec, st, withCamera) {
     this._begin(ctx);
-    const cam = st.camera || NO_CAM;
-    const z = fin(cam.zoom, 1) * Math.max(this.overscan, coverZoom(cam));
-    ctx.translate(W / 2 + fin(cam.x, 0), H / 2 + fin(cam.y, 0));
-    ctx.rotate(fin(cam.rot, 0));
-    ctx.scale(z, z);
-    ctx.translate(-W / 2, -H / 2);
+    if (withCamera) this._camera(ctx, st.camera);
     const impl = spec && MV.scenes && MV.scenes.get(spec.name);
     const fallback = () => {
       this._begin(ctx);
@@ -415,11 +502,105 @@
         continue;
       }
       if ((impl.layer || 'over') !== layer) continue;
+      const acc = a.avoid ? this._placeAccent(a) : a;
       this._begin(ctx);
       ctx.save();
-      this._try('effect', a.kind, () => impl.draw(ctx, st.env, a));
+      this._try('effect', a.kind, () => impl.draw(ctx, st.env, acc));
       ctx.restore();
     }
+  };
+
+  /**
+   * Copy of accent `a` positioned against the lyric lines it must not cover
+   * (a.avoid from MV.Director): 'away' → burst centre ≥ AWAY_MARGIN off the
+   * lines' union box (nearest such spot, on screen); 'focus' → the centre of
+   * the first (sung) line. Layout-space boxes: stable over the accent's life.
+   */
+  Stage.prototype._placeAccent = function (a) {
+    const av = a.avoid;
+    const lines = av && av.lines;
+    if (!lines || !lines.length) return a;
+    let B = null;
+    const n = av.mode === 'focus' ? 1 : lines.length;
+    for (let i = 0; i < n; i++) {
+      const it = lines[i];
+      if (!it || !it.line) continue;
+      const b = this._lineBox(it.line, it.style);
+      if (!B) B = { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 };
+      else {
+        B.x0 = Math.min(B.x0, b.x0);
+        B.y0 = Math.min(B.y0, b.y0);
+        B.x1 = Math.max(B.x1, b.x1);
+        B.y1 = Math.max(B.y1, b.y1);
+      }
+    }
+    if (!B) return a;
+    const out = Object.assign({}, a);
+    if (av.mode === 'focus') {
+      out.x = clamp((B.x0 + B.x1) / 2, 240, W - 240);
+      out.y = clamp((B.y0 + B.y1) / 2, 200, H - 200);
+    } else {
+      const p = placeAway(B, fin(a.x, W / 2), fin(a.y, H / 2), AWAY_MARGIN);
+      out.x = p[0];
+      out.y = p[1];
+    }
+    return out;
+  };
+
+  // Registered style for a lyric item / line (missing → 'ransom', logged once).
+  Stage.prototype._style = function (name) {
+    let n = name || 'ransom';
+    let impl = MV.lyricStyles && MV.lyricStyles.get(n);
+    if (!impl) {
+      this._err('style-missing', n);
+      n = 'ransom';
+      impl = MV.lyricStyles && MV.lyricStyles.get(n);
+    }
+    return { name: n, impl };
+  };
+
+  // Layout-space AABB of `line` in `style` (from the cached layout; the
+  // fallback plate's box when there is no usable layout).
+  Stage.prototype._lineBox = function (line, style) {
+    const s = this._style(style || line.style);
+    const L = s.impl ? this._layout(s.impl, s.name, line, this.comp.ctx) : null;
+    const b = L && L.bounds;
+    if (b && isFinite(b.x0) && isFinite(b.y0) && isFinite(b.x1) && isFinite(b.y1) && b.x1 >= b.x0 && b.y1 >= b.y0) return b;
+    return { x0: W / 2 - 850, y0: H * 0.76 - 90, x1: W / 2 + 850, y1: H * 0.76 + 90 };
+  };
+
+  /**
+   * env.lyricBounds for this frame: screen-space AABBs of the visible lyric
+   * lines (layout bounds through the lyric parallax transform), in draw order.
+   * Effects may use them to keep clear of the text.
+   */
+  Stage.prototype._lyricBounds = function (st) {
+    const out = [];
+    const list = st.lyrics || [];
+    const cam = st.camera || NO_CAM;
+    const k = this.parallax;
+    const z = 1 + (fin(cam.zoom, 1) - 1) * k;
+    const r = fin(cam.rot, 0) * k;
+    const c = Math.cos(r), s = Math.sin(r);
+    const tx = W / 2 + fin(cam.x, 0) * k, ty = H / 2 + fin(cam.y, 0) * k;
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i];
+      if (!item || !item.line) continue;
+      const b = this._lineBox(item.line, item.style);
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (let q = 0; q < 4; q++) {
+        const px = (q & 1 ? b.x1 : b.x0) - W / 2, py = (q & 2 ? b.y1 : b.y0) - H / 2;
+        const X = tx + z * (px * c - py * s), Y = ty + z * (px * s + py * c);
+        if (X < x0) x0 = X;
+        if (X > x1) x1 = X;
+        if (Y < y0) y0 = Y;
+        if (Y > y1) y1 = Y;
+      }
+      const lt = item.lt || {};
+      out.push({ x0, y0, x1, y1, id: item.line.id, style: item.style || item.line.style, alpha: clamp(fin(lt.in, 1), 0, 1) * (1 - clamp(fin(lt.out, 0), 0, 1)) });
+    }
+    if (st.env) st.env.lyricBounds = out;
+    return out;
   };
 
   /* ---------------- lyrics ---------------- */
@@ -458,13 +639,7 @@
       const item = list[i];
       const line = item.line;
       if (!line) continue;
-      let name = item.style || line.style || 'ransom';
-      let impl = MV.lyricStyles && MV.lyricStyles.get(name);
-      if (!impl) {
-        this._err('style-missing', name);
-        name = 'ransom';
-        impl = MV.lyricStyles && MV.lyricStyles.get(name);
-      }
+      const { name, impl } = this._style(item.style || line.style);
       this._begin(ctx);
       const z = 1 + (fin(cam.zoom, 1) - 1) * k;
       ctx.translate(W / 2 + fin(cam.x, 0) * k, H / 2 + fin(cam.y, 0) * k);
@@ -559,6 +734,29 @@
       rows.push(`cam ${f2(c.x)},${f2(c.y)} z${c.zoom.toFixed(3)} r${(c.rot * 57.3).toFixed(2)}°  post rgb${f2(p.rgbShift)} gl${f2(p.glitch)} fl${f2(p.flash)}/${f2(p.redFlash)}`);
     } else rows.push('no director');
     if (this.errors.size) rows.push('errors ' + Array.from(this.errors.keys()).join(', '));
+    rows.push(`camera ${this.cameraMode}  post direct ${S.postDirect}`);
+    if (st && st.env && st.env.lyricBounds) {
+      // lyric boxes (yellow) and the placed position of avoiding accents (cross)
+      ctx.save();
+      ctx.lineWidth = 3;
+      ctx.setLineDash([14, 10]);
+      ctx.strokeStyle = '#FFE14D';
+      for (const b of st.env.lyricBounds) ctx.strokeRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
+      ctx.setLineDash([]);
+      for (const a of st.accents || []) {
+        if (!a.avoid) continue;
+        const p = this._placeAccent(a);
+        const px = fin(p.x, W / 2), py = fin(p.y, H / 2);
+        ctx.strokeStyle = a.avoid.mode === 'focus' ? '#FFFFFF' : '#FFE14D';
+        ctx.beginPath();
+        ctx.moveTo(px - 26, py - 26);
+        ctx.lineTo(px + 26, py + 26);
+        ctx.moveTo(px + 26, py - 26);
+        ctx.lineTo(px - 26, py + 26);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
     const x = 24, y = 24, lh = 26;
     ctx.font = '600 19px ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace';
     let w = 0;
@@ -576,18 +774,43 @@
     });
   };
 
+  /** True when these post params leave the frame unchanged (MV.Post.isNeutral when available). */
+  Stage.prototype.postNeutral = function (params) {
+    const P = params || NEUTRAL_POST;
+    try {
+      if (MV.Post && typeof MV.Post.isNeutral === 'function') return !!MV.Post.isNeutral(P);
+      if (this.post && typeof this.post.isNeutral === 'function') return !!this.post.isNeutral(P);
+    } catch (e) {
+      this._err('post', 'isNeutral', e);
+    }
+    return neutralPost(P);
+  };
+
+  // Plain copy of the composite into a 2D output context.
+  Stage.prototype._blit = function (o) {
+    o.setTransform(1, 0, 0, 1, 0, 0);
+    o.globalAlpha = 1;
+    o.globalCompositeOperation = 'source-over';
+    if ('filter' in o) o.filter = 'none';
+    o.drawImage(this.comp.canvas, 0, 0, this.canvas.width, this.canvas.height);
+  };
+
   Stage.prototype._present = function (st) {
-    const params = st ? st.post : { grain: 0, vignette: 0 };
+    const params = (st && st.post) || NEUTRAL_POST;
     if (this.post) {
+      // Neutral params on a 2D output: skip MV.Post and blit directly. (A WebGL
+      // output can only be written by GL; MV.Post runs its bare copy pass then.)
+      const direct = this.post.mode === '2d' && this.post.ctx2d && this.postNeutral(params);
+      if (direct && this._try('post', 'blit', () => this._blit(this.post.ctx2d))) {
+        this.stats.postDirect++;
+        return;
+      }
       this._try('post', 'render', () => this.post.render(this.comp.canvas, params));
       return;
     }
     if (this.outCtx) {
-      const o = this.outCtx;
-      o.setTransform(1, 0, 0, 1, 0, 0);
-      o.globalAlpha = 1;
-      o.globalCompositeOperation = 'source-over';
-      o.drawImage(this.comp.canvas, 0, 0, this.canvas.width, this.canvas.height);
+      this._blit(this.outCtx);
+      this.stats.postDirect++;
     }
   };
 
