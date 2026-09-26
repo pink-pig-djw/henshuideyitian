@@ -74,6 +74,23 @@
     }
     return s.canvas;
   }
+  // CPU-backed sprite (willReadFrequently) for pattern tiles: in Chrome a pattern
+  // made from a GPU-backed canvas rasterises its first use on a software context
+  // differently from later uses; a CPU tile keeps every frame identical.
+  function cpuSprite(w, h, paint) {
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(w));
+    cv.height = Math.max(1, Math.round(h));
+    let c = null;
+    try {
+      c = cv.getContext('2d', { willReadFrequently: true });
+    } catch (e) {
+      c = null;
+    }
+    if (!c) return sprite(w, h, paint);
+    paint(c, cv.width, cv.height);
+    return cv;
+  }
   function fillAll(ctx, color) {
     ctx.fillStyle = color;
     ctx.fillRect(-OVF, -OVF, W + OVF * 2, H + OVF * 2);
@@ -577,7 +594,7 @@
     if (tile) return tile;
     const [cell, h, color, fnV] = RAMPS[key];
     const P = Math.round(cell * Math.SQRT2), half = P / 2;
-    tile = sprite(P, h, (c) => {
+    tile = cpuSprite(P, h, (c) => {
       c.fillStyle = color;
       c.beginPath();
       for (let y = 0, row = 0; y < h + half; y += half, row++) {

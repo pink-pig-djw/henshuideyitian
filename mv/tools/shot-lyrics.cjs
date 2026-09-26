@@ -58,31 +58,45 @@ async function savePng(page, file) {
   const page = await browser.newPage({ viewport: { width: 1920, height: 1200 }, ignoreHTTPSErrors: true });
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
-  page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+  page.on('console', (m) => { if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) errors.push(m.text()); });
   // The proxy occasionally drops a font request (a failed face silently falls
   // back to a system font), so verify every face is 'loaded' and retry.
-  let faces = [];
-  for (let attempt = 1; attempt <= 4; attempt++) {
-    await page.goto(`http://localhost:${PORT}/tools/dev-lyrics.html?shot=1`, { waitUntil: 'load', timeout: 120000 });
-    await page.evaluate(() => window.LyricDev.ready);
-    faces = await page.evaluate(async () => {
-      await Promise.all(Array.from(document.fonts).map((f) => f.load().catch(() => null)));
-      return Array.from(document.fonts).map((f) => [f.family + ' ' + f.weight, f.status]);
-    });
-    const want = await page.evaluate(() => window.LYRIC_FONT_FAMILIES || 0);
-    const bad = faces.filter((f) => f[1] !== 'loaded');
-    const ok = faces.length - bad.length;
-    console.log(`fonts (attempt ${attempt}): ${ok}/${want} loaded` + (bad.length ? ' — missing ' + bad.map((f) => f[0]).join(', ') : ''));
-    if (ok >= want) break;
-    errors.length = 0;
+  // `extra` = additional glyphs for the page's text-subset font request.
+  async function openPage(extra) {
+    const q = extra ? '&extra=' + encodeURIComponent(extra) : '';
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      await page.goto(`http://localhost:${PORT}/tools/dev-lyrics.html?shot=1${q}`, { waitUntil: 'load', timeout: 120000 });
+      await page.evaluate(() => window.LyricDev.ready);
+      const faces = await page.evaluate(async () => {
+        await Promise.all(Array.from(document.fonts).map((f) => f.load().catch(() => null)));
+        return Array.from(document.fonts).map((f) => [f.family + ' ' + f.weight, f.status]);
+      });
+      const want = await page.evaluate(() => window.LYRIC_FONT_FAMILIES || 0);
+      const bad = faces.filter((f) => f[1] !== 'loaded');
+      const ok = faces.length - bad.length;
+      console.log(`fonts (attempt ${attempt}): ${ok}/${want} loaded` + (bad.length ? ' — missing ' + bad.map((f) => f[0]).join(', ') : ''));
+      if (ok >= want) return true;
+      errors.length = 0;
+    }
+    return false;
   }
+  await openPage('');
   await page.evaluate(() => window.LyricDev.render({ style: 'ransom', fx: 'jp3', moment: 'full' }));
 
   const styles = (opt('style') || 'ransom,slash,impact,dialog,vertical,card,split,glitch').split(',');
   const allFx = await page.evaluate(() => window.LyricDev.fixtures);
   const fxs = flag('all') ? allFx : ['jp3', 'tail', 'hook', 'max', 'one'];
   const moments = ['lead', 'mid', 'full', 'exit'];
-  const bgFor = (style, k) => (style === 'vertical' || style === 'dialog' ? ['night', 'city', 'red', 'black'][k % 4] : ['red', 'black', 'city', 'night'][k % 4]);
+  // Backdrops for the full-size frames: the real scenes when scenes.js is
+  // present (matching each style's usual section), else built-in busy fills.
+  const hasScenes = await page.evaluate(() => !!(window.MV.scenes && window.MV.scenes.has('sunburst')));
+  const SCENES = {
+    ransom: ['sunburst', 'sky-red', 'shards', 'crowd'], slash: ['night-city', 'crowd', 'train', 'stripes'],
+    impact: ['sunburst', 'shards', 'sky-red', 'starfield'], dialog: ['night-city', 'train', 'crowd', 'void'],
+    vertical: ['starfield', 'void', 'starfield', 'night-city'], card: ['starfield', 'sky-red', 'void', 'sunburst'],
+    split: ['sky-red', 'crowd', 'sunburst', 'shards'], glitch: ['tunnel', 'stripes', 'tunnel', 'starfield'],
+  };
+  const bgFor = (style, k) => (hasScenes ? 'scene:' + SCENES[style][k % 4] : (style === 'vertical' || style === 'dialog' ? ['night', 'city', 'red', 'black'][k % 4] : ['red', 'black', 'city', 'night'][k % 4]));
 
   if (!flag('check') || flag('shots')) {
     for (const style of styles) {
@@ -143,6 +157,10 @@ async function savePng(page, file) {
       console.log(`size ${style}: min ${Math.min(...sizes).toFixed(0)} px, median ${sizes.sort((a, b) => a - b)[sizes.length >> 1].toFixed(0)} px`);
     }
 
+    // Edge cases (empty / missing data / 60 chars / symbols) must not throw.
+    const rob = await page.evaluate(() => window.LyricDev.robust());
+    console.log(`robustness: ${rob.length ? 'FAIL ' + rob.join(' | ') : 'ok (8 styles x 7 edge cases, no throws, all in bounds)'}`);
+
     // Determinism: same frame rendered twice (with other frames between) hashes identically.
     let det = 0, detN = 0;
     for (const style of styles) {
@@ -160,16 +178,22 @@ async function savePng(page, file) {
     // Draw cost.
     for (const style of styles) {
       const r = await page.evaluate((o) => window.LyricDev.perf(o), { style, fx: 'max', n: 80 });
-      console.log(`perf ${style}: avg ${r.avg.toFixed(2)} ms, max ${r.max.toFixed(2)} ms (40-char line, headless CPU)`);
+      console.log(`perf ${style}: avg ${r.avg.toFixed(2)} ms, max ${r.max.toFixed(2)} ms (40-char line, excl. backdrop blit; swiftshader canvas, relative only)`);
     }
 
     // Optional: real lyrics from a local file outside the repo (never printed).
     if (process.env.MV_LYRICS && fs.existsSync(process.env.MV_LYRICS)) {
       const text = fs.readFileSync(process.env.MV_LYRICS, 'utf8');
+      if (process.env.MV_LYRICS_SHOTS) {
+        // Reload with the lyric glyph set (sorted, de-duplicated) so the
+        // subset fonts cover it; only the character set is requested.
+        await openPage(Array.from(new Set(Array.from(text.replace(/\s+/g, '')))).sort().join(''));
+      }
       await page.addScriptTag({ url: `http://localhost:${PORT}/js/lyrics.js` });
       const res = await page.evaluate(async ({ text, styles }) => {
         const preset = window.MV.getPreset('hoshi-to-bokura-to');
         const track = window.MV.Lyrics.parse(text, { preset });
+        window.__realTrack = track;
         await window.MV.fonts.ensure(track.lines.map((l) => l.text).join(''), 15000);
         const out = { lines: track.lines.length, source: track.source, fails: [], checked: 0, minSize: {}, chars: [] };
         for (const l of track.lines) {
@@ -186,10 +210,27 @@ async function savePng(page, file) {
       console.log(`real lyrics: ${res.lines} lines (${res.source}), char counts [${res.chars.join(',')}], ${res.checked - res.fails.length}/${res.checked} layouts fit`);
       console.log('real lyrics min size:', Object.entries(res.minSize).map(([k, v]) => k + ' ' + Math.round(v)).join(', '));
       if (res.fails.length) console.log('real lyrics FAIL:', res.fails.join(' '));
-      if (process.env.MV_LYRICS_SHOTS) {
-        // Local-only frames of the real lines (written to out/, git-ignored).
-        const n = await page.evaluate(() => 0);
-        void n;
+      const shotDir = process.env.MV_LYRICS_SHOTS;
+      if (shotDir) {
+        // Local-only QA frames of the real lines. Write them OUTSIDE the repo
+        // (e.g. a scratch dir): they contain rendered lyric text.
+        if (path.resolve(shotDir).startsWith(path.resolve(ROOT, '..'))) throw new Error('MV_LYRICS_SHOTS must be outside the repository');
+        fs.mkdirSync(shotDir, { recursive: true });
+        const n = await page.evaluate(() => window.__realTrack.lines.length);
+        for (let k = 0; k < n; k++) {
+          for (const m of ['mid', 'full']) {
+            await page.evaluate(({ k, m }) => {
+              const l = window.__realTrack.lines[k];
+              const ph = l.phrases;
+              const last = Math.max.apply(null, Array.from(l.charTimes));
+              const t = m === 'mid' ? (ph.length > 1 ? ph[Math.floor(ph.length / 2)].start + 0.1 : l.start + 0.1) : last + 0.5;
+              const bg = { verse: 'city', bridge: 'night', build: 'night', hook: 'red', chorus: 'red', pre: 'black' }[l.sectionKind] || 'black';
+              return window.LyricDev.renderLine(l.style, l, t, bg);
+            }, { k, m });
+            await savePng(page, path.join(shotDir, `real-${String(k).padStart(2, '0')}-${m}.png`));
+          }
+        }
+        console.log(`real lyrics: ${n * 2} local QA frames written (outside the repo)`);
       }
     }
   }

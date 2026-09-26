@@ -16,8 +16,8 @@
     bridge: { phrases: ['静かな', '夜に', '星が', 'ひとつ', '落ちて', 'きらり', 'と', '消えた'], gap: 0.9, kind: 'bridge' },
     one: { phrases: ['星'], gap: 1.5, kind: 'hook' },
     max: { phrases: ['遠く離れた街の灯りが', '揺れる窓に映って', '眠れない夜を越えて', 'ずっと歩いていく'], gap: 1.4, kind: 'chorus' },
-    en: { phrases: ['Take your heart', 'and run away'], gap: 1.4, kind: 'chorus' },
-    long: { phrases: ['誰も知らない明日の扉を', '今この手で開けて', 'We will find our way'], gap: 1.6, kind: 'climax' },
+    en: { phrases: ['Break the silence', 'and run away'], gap: 1.4, kind: 'chorus' },
+    long: { phrases: ['誰も知らない明日の扉を', '今この手で開けて', 'Shine on through the dark'], gap: 1.6, kind: 'climax' },
   };
   // Google Fonts subset to exactly the glyphs this page draws (text=…): one
   // small file per family instead of hundreds of unicode-range slices.
@@ -87,6 +87,7 @@
 <script src="../js/core.js"></script>
 <script src="../data/hoshi-to-bokura-to.js"></script>
 <script src="dev-env.js"></script>
+<script src="../js/render/scenes.js"></script>
 <script src="../js/render/lyricfx.js"></script>
 <script>
 /*
@@ -169,7 +170,9 @@
         try {
           if (!sc._devPrepared && sc.prepare) { sc.prepare({ W, H, width: W, height: H, scale: 1 }); }
           sc._devPrepared = true;
-          sc.draw(g, MV.devEnv(t, {}), { seed: 5, lt: t, dur: 8, variant: 0, speed: 1, intensity: 0.8 });
+          const env = MV.devEnv(t, {});
+          const p = { seed: 5, lt: t, dur: 8, variant: 0, speed: 1, intensity: env.intensity };
+          sc.draw(g, env, p);
           return;
         } catch (e) { console.warn(e); }
       }
@@ -270,24 +273,86 @@
       const L = MV.lyricStyles.get(style).layout(line, ctx);
       return Object.assign({ chars: line.chars.length, size: L.size, rows: (L.rows || []).length }, MV.LyricFX.check(L));
     },
-    /** ms per draw call over n frames across the line's visible window. */
+    /**
+     * ms per frame (backdrop blit + lyric draw) over n frames across the line's
+     * visible window. Each frame is flushed with a 1x1 GPU-side copy (a
+     * getImageData flush would de-accelerate the canvas and skew sprite costs).
+     */
     perf(o) {
       const line = makeLine(o);
       const L = getLayout(o.style, line);
-      const off = MV.makeCanvas(1920, 1080).canvas.getContext('2d', { willReadFrequently: false });
+      const off = MV.makeCanvas(1920, 1080).ctx;
+      const tiny = MV.makeCanvas(1, 1).ctx;
+      backdrop('red', off, 0);
+      const bg = bgCache.red;
       const n = o.n || 60;
-      let tot = 0, max = 0;
+      const frame = (t) => {
+        off.drawImage(bg, 0, 0);
+        MV.lyricStyles.get(o.style).draw(off, line, L, ltFor(line, t), MV.devEnv(t, {}));
+        tiny.drawImage(off.canvas, 0, 0, 1, 1);
+      };
+      for (let k = 0; k < 5; k++) frame(line.start + k * 0.3); // warm-up (glyph caches, sprites)
+      tiny.getImageData(0, 0, 1, 1);
+      let tot = 0, max = 0, base = 0;
+      for (let k = 0; k < n; k++) {
+        const t0 = performance.now();
+        off.drawImage(bg, 0, 0);
+        tiny.drawImage(off.canvas, 0, 0, 1, 1);
+        base += performance.now() - t0;
+      }
       for (let k = 0; k < n; k++) {
         const t = line.showStart + ((line.showEnd - line.showStart) * k) / n;
-        off.clearRect(0, 0, 1920, 1080);
-        off.getImageData(0, 0, 1, 1);
         const t0 = performance.now();
-        MV.lyricStyles.get(o.style).draw(off, line, L, ltFor(line, t), MV.devEnv(t, {}));
-        off.getImageData(0, 0, 1, 1); // force rasterisation so the timing is honest
+        frame(t);
         const d = performance.now() - t0;
         tot += d; max = Math.max(max, d);
       }
-      return { avg: tot / n, max };
+      tiny.getImageData(0, 0, 1, 1);
+      return { avg: tot / n - base / n, max, base: base / n };
+    },
+    /**
+     * Render an arbitrary Line (e.g. parsed at test time) at absolute time t.
+     * Returns the layout check. Used for local-only QA of real lyrics.
+     */
+    renderLine(style, line, t, bg) {
+      cv.width = 1920; cv.height = 1080;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      backdrop(bg || 'red', ctx, t);
+      const L = MV.lyricStyles.get(style).layout(line, ctx);
+      MV.lyricStyles.get(style).draw(ctx, line, L, ltFor(line, t), MV.devEnv(t, { kind: line.sectionKind || 'chorus' }));
+      return MV.LyricFX.check(L);
+    },
+    /** Edge cases: every style must lay out and draw without throwing. */
+    robust() {
+      const errs = [];
+      const off = MV.makeCanvas(640, 360).ctx;
+      const base = makeLine({ fx: 'jp3' });
+      const cases = {
+        empty: { text: '', chars: [], phrases: [], segments: [], charTimes: new Float32Array(0), start: 1, end: 2, seed: 1 },
+        noPhrases: { text: '夜空 Hello 星', start: 1, end: 3, seed: 2 },
+        noTimes: Object.assign({}, base, { charTimes: null }),
+        nanTimes: Object.assign({}, base, { charTimes: new Float32Array(base.chars.length).fill(NaN) }),
+        badPhrases: Object.assign({}, base, { phrases: [{ text: 'x', start: 1, end: 2, charStart: -5, charEnd: 999 }] }),
+        long60: makeLine({ text: 'あいうえおかきくけこさしすせそたちつてと|なにぬねのはひふへほまみむめも|やゆよらりるれろわをんアイウエオ|Keep going on' }),
+        symbols: makeLine({ text: '★ー〜「星」！？|（ABC）、。…' }),
+      };
+      for (const style of STYLES) {
+        for (const [name, line] of Object.entries(cases)) {
+          try {
+            const st = MV.lyricStyles.get(style);
+            const L = st.layout(line, off);
+            for (const t of [0, 1, 1.5, 2.5, 4, 9]) {
+              st.draw(off, line, L, {}, {});
+              st.draw(off, line, L, ltFor(Object.assign({ showStart: 0.7, showEnd: 5 }, line), t), MV.devEnv(t, {}));
+            }
+            const c = MV.LyricFX.check(L);
+            if (!c.ok) errs.push(style + ':' + name + ':bounds');
+          } catch (e) {
+            errs.push(style + ':' + name + ': ' + e.message);
+          }
+        }
+      }
+      return errs;
     },
     /** Hash of a rendered frame (determinism check). */
     hash(o) {

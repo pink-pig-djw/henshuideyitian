@@ -20,6 +20,32 @@
  *    0.12–0.25 s pop. Latin phrases use Latin faces (charTimes are per word).
  *  - All text stays inside BOX = x 110..1810, y 104..952, which lies inside the
  *    safe area (80..1840 × 60..1020) and clear of both HUD zones.
+ *
+ * Layout objects (opaque to callers) always carry:
+ *   { name, size (main type size, px), bounds (world AABB of the text), epoch, ... }
+ * Styles read line.charTimes / showStart / showEnd at draw time, so timing
+ * edits (sync editor, offsets) need no re-layout; text / phrase changes do.
+ * lt.in / lt.out drive the container entrance / exit (tuned for ~0.3 s ramps);
+ * when absent they are derived from line.showStart / showEnd.
+ *
+ * MV.LyricFX (shared helpers):
+ *   drawLatin(ctx, text, x, y, size, progress, env, seed) → advance width
+ *       huge skewed Anton, black outline, hard red shadow; words pop in as
+ *       progress 0→1; (x, y) = left end of the baseline.
+ *   measureLatin(text, size) → width of drawLatin's text
+ *   drawEmblem(ctx, x, y, r, rot, {star, edge, slash, gap, shadow})
+ *       the original star-pierced-by-a-slash emblem
+ *   ransomSpecs(info, seed, combos) / placeTiles(...) / drawTile(ctx, tile, ...)
+ *       cut-paper ransom tiles (used by ransom and card)
+ *   glyphText(ctx, ch, font, x, y, fill, stroke, strokeW, shadow, sx, sy)
+ *   charInfo(line), tokens(line), planRows(line, info, advances, opts), splitTok(...)
+ *   reveal(line, i, t, dur) → 0..1 pop progress of glyph i
+ *   timing(line, lt, env) → { t, inP, outP, showStart, showEnd }
+ *   check(layout) → { ok, safe, hud, bounds }   (tests)
+ *   fontSample   extra glyphs styles draw (glitch scramble set, ★) — append to
+ *                the MV.fonts.ensure sample
+ *   speaker      optional name for the dialog plate (else preset artist, else ★)
+ *   SAFE, BOX, HUD_ZONES, LEAD, FACE, epoch()
  */
 (function () {
   'use strict';
@@ -680,6 +706,38 @@
     return cx - spaceW - x;
   }
 
+  // Radial halftone sprite (dots grow toward the rim), rendered once per colour.
+  const discCache = new Map();
+  function halftoneDisc(color) {
+    let c = discCache.get(color);
+    if (!c) {
+      const N = 640, R = N / 2 / 1.1, cell = R * 0.1;
+      const m = MV.makeCanvas(N, N);
+      m.ctx.fillStyle = color;
+      m.ctx.beginPath();
+      for (let gy = -N / 2; gy <= N / 2; gy += cell) {
+        for (let gx = -N / 2; gx <= N / 2; gx += cell) {
+          const rad = clamp((Math.hypot(gx, gy) / R - 0.5) / 0.55) * cell * 0.52;
+          if (rad < 0.6) continue;
+          m.ctx.moveTo(N / 2 + gx + rad, N / 2 + gy);
+          m.ctx.arc(N / 2 + gx, N / 2 + gy, rad, 0, TAU);
+        }
+      }
+      m.ctx.fill();
+      c = m.canvas;
+      discCache.set(color, c);
+    }
+    return c;
+  }
+
+  /** Width (px) of `text` as drawLatin renders it at `size`. */
+  function measureLatin(text, size) {
+    const words = String(text || '').split(/\s+/).filter(Boolean);
+    let w = 0;
+    for (const wd of words) for (const ch of MV.text.chars(wd)) w += met(ch, FACE.anton).w * size;
+    return w + Math.max(0, words.length - 1) * met(' ', FACE.anton).w * size * 1.2;
+  }
+
   // Cached horizontal scanline pattern (per context).
   const scanCache = new WeakMap();
   function scanPattern(ctx) {
@@ -769,7 +827,7 @@
   }
   const optsOf = (x) => (x && typeof x === 'object' && typeof x.measureText !== 'function' ? x : null);
   const seedOf = (line) => (finite(line.seed) ? line.seed >>> 0 : MV.hash32(line.text || '', 7));
-  const EMPTY = (name, opts) => ({ name, epoch, opts, empty: true, cx: W / 2, cy: H / 2, rows: [], glyphs: [], bounds: { x0: W / 2, y0: H / 2, x1: W / 2, y1: H / 2 } });
+  const EMPTY = (name, opts) => ({ name, epoch, opts, empty: true, size: 0, cx: W / 2, cy: H / 2, rows: [], glyphs: [], bounds: { x0: W / 2, y0: H / 2, x1: W / 2, y1: H / 2 } });
 
   /* ================================================================== */
   /* Style: ransom — cut-paper collage                                   */
@@ -1194,19 +1252,7 @@
           ctx.strokeStyle = C.ink;
           ctx.stroke();
           ctx.clip();
-          ctx.fillStyle = inv ? 'rgba(0,0,0,0.16)' : C.redDeep;
-          ctx.beginPath();
-          const cell = Math.max(22, r * 0.1);
-          for (let gy = -r * 1.1; gy <= r * 1.1; gy += cell) {
-            for (let gx = -r * 1.1; gx <= r * 1.1; gx += cell) {
-              const d = Math.hypot(gx, gy) / r;
-              const rad = clamp((d - 0.5) / 0.55) * cell * 0.52;
-              if (rad < 1) continue;
-              ctx.moveTo(gx + rad, gy);
-              ctx.arc(gx, gy, rad, 0, TAU);
-            }
-          }
-          ctx.fill();
+          ctx.drawImage(halftoneDisc(inv ? 'rgba(0,0,0,0.16)' : C.redDeep), -r * 1.1, -r * 1.1, r * 2.2, r * 2.2);
           ctx.restore();
         }
         // Halftone shock ring.
@@ -2077,6 +2123,7 @@
     /** Optional name for the dialog name plate (else preset artist, else ★). */
     speaker: MV.LyricFX && MV.LyricFX.speaker ? MV.LyricFX.speaker : null,
     drawLatin,
+    measureLatin,
     drawEmblem,
     drawTile,
     glyphText,

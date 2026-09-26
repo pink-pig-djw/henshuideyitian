@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dev · FX / Post</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<script>
+  // Invented placeholder captions only (never lyrics of a real song).
+  window.FX_FIXTURES = {
+    captions: ['夜明けの駅で', 'TAKE YOUR TIME', '星を数えて', 'NEXT STOP'],
+  };
+  // Google Fonts subset to the glyphs this page draws (song meta + fixtures + ASCII).
+  (function () {
+    const q = new URLSearchParams(location.search);
+    const fams = ['Anton', 'Archivo+Black', 'Bebas+Neue', 'Dela+Gothic+One', 'DotGothic16', 'Kaisei+Decol:wght@700',
+      'Noto+Sans+JP:wght@500;900', 'Noto+Sans+SC:wght@900', 'Noto+Serif+JP:wght@900', 'Permanent+Marker', 'Potta+One',
+      'Rampart+One', 'Reggae+One', 'RocknRoll+One', 'Shippori+Mincho+B1:wght@800', 'Zen+Antique'];
+    let text = '';
+    if (q.get('fonts') !== 'full') {
+      let all = window.FX_FIXTURES.captions.join('') + '星と僕らと小森成雄目黒将司曲歌作詞作曲あア★' + (q.get('text') || '');
+      for (let c = 32; c < 127; c++) all += String.fromCharCode(c);
+      text = '&text=' + encodeURIComponent(Array.from(new Set(Array.from(all))).join(''));
+    }
+    const cssFor = (list, tag) => 'https://fonts.googleapis.com/css2?family=' + list.join('&family=') + '&display=block' + text + (tag ? '&r=' + tag : '');
+    const addCSS = (list, tag) => new Promise((res) => {
+      let tries = 0;
+      const add = () => {
+        const l = document.createElement('link');
+        l.rel = 'stylesheet';
+        l.href = cssFor(list, tag + (tries ? '-' + tries : ''));
+        l.onload = () => res(true);
+        l.onerror = () => { l.remove(); if (++tries < 4) setTimeout(add, 400 * tries); else res(false); };
+        document.head.appendChild(l);
+      };
+      add();
+      setTimeout(() => res(false), 30000);
+    });
+    window.FX_FONT_CSS = addCSS(fams, '');
+    // Flaky networks/proxies sometimes drop individual font files: re-request
+    // the stylesheet for the families whose files errored (new FontFace rules).
+    window.FX_FONT_RETRY = async function (ensure) {
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        await ensure();
+        const ok = new Set([...document.fonts].filter((f) => f.status === 'loaded').map((f) => f.family.replace(/"/g, '')));
+        const bad = new Set([...document.fonts].filter((f) => f.status === 'error').map((f) => f.family.replace(/"/g, '')));
+        const todo = fams.filter((spec) => { const fam = spec.split(':')[0].replace(/\+/g, ' '); return bad.has(fam) && !ok.has(fam); });
+        if (!todo.length) return true;
+        await addCSS(todo, 'a' + attempt);
+      }
+      await ensure();
+      return false;
+    };
+  })();
+</script>
+<style>
+  /* Dev-page chrome only; everything interesting is drawn into the 1920×1080 canvases. */
+  :root { color-scheme: dark; --red: #E60012; --ink: #0A0A0A; --white: #FFFFFF; --muted: rgba(255,255,255,.6); }
+  html, body { margin: 0; height: 100%; background: var(--ink); color: var(--white); font: 13px/1.4 "Noto Sans SC", "Noto Sans JP", system-ui, sans-serif; }
+  body { overflow: hidden; }
+  .wrap { position: absolute; inset: 0; display: flex; flex-direction: column; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 10px 16px; background: #000; border-bottom: 3px solid var(--red); }
+  .bar h1 { margin: 0 8px 0 0; font: 400 24px/1 Anton, Impact, "Arial Narrow", sans-serif; letter-spacing: .04em; transform: skewX(-12deg); text-shadow: 3px 3px 0 var(--red); }
+  .bar label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
+  .bar select, .bar input[type=number] { background: #111; color: #fff; border: 1px solid #333; padding: 4px 6px; font: inherit; }
+  .bar input[type=range] { width: 180px; accent-color: var(--red); }
+  .bar button { border: 0; padding: 7px 12px; font: 700 13px/1 inherit; font-family: inherit; background: #fff; color: var(--ink); transform: skewX(-12deg); box-shadow: 3px 3px 0 var(--red); cursor: pointer; }
+  .bar .out { color: var(--muted); min-width: 120px; font-variant-numeric: tabular-nums; }
+  .post { display: none; gap: 10px; }
+  body.mode-post .post { display: inline-flex; flex-wrap: wrap; }
+  .stage { flex: 1; display: grid; place-items: center; min-height: 0; padding: 12px; position: relative; }
+  canvas.view { max-width: 100%; max-height: 100%; aspect-ratio: 16 / 9; background: #000; display: block; grid-area: 1 / 1; }
+  #glwrap { display: none; grid-area: 1 / 1; max-width: 100%; max-height: 100%; aspect-ratio: 16 / 9; }
+  #glwrap canvas { width: 100%; height: 100%; display: block; }
+  body.mode-post #glwrap { display: block; }
+  body.mode-post #cv { visibility: hidden; }
+  body.noui .bar { display: none; }
+  body.noui .stage { padding: 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <h1>DEV · FX</h1>
+    <label>类型 Kind <select id="kind">
+      <option value="transition">转场 transition</option>
+      <option value="effect">效果 effect</option>
+      <option value="hud">HUD</option>
+      <option value="post">后期 post</option>
+    </select></label>
+    <label>名称 Name <select id="name"></select></label>
+    <label>进度 p / t <input id="p" type="range" min="0" max="1" step="0.005"><span id="pv" class="out" style="min-width:56px"></span></label>
+    <label>种子 Seed <input id="seed" type="number" min="0" step="1" style="width:70px"></label>
+    <label>背景 BG <select id="bg"></select></label>
+    <span class="post">
+      <label>rgbShift <input id="pp-rgbShift" type="range" min="0" max="30" step="0.5" value="0" style="width:90px"></label>
+      <label>glitch <input id="pp-glitch" type="range" min="0" max="1" step="0.01" value="0" style="width:90px"></label>
+      <label>grain <input id="pp-grain" type="range" min="0" max="1" step="0.01" value="0" style="width:90px"></label>
+      <label>vignette <input id="pp-vignette" type="range" min="0" max="1" step="0.01" value="0" style="width:90px"></label>
+      <label>flash <input id="pp-flash" type="range" min="0" max="1" step="0.01" value="0" style="width:90px"></label>
+      <label>redFlash <input id="pp-redFlash" type="range" min="0" max="1" step="0.01" value="0" style="width:90px"></label>
+      <label>invert <input id="pp-invert" type="range" min="0" max="1" step="0.01" value="0" style="width:90px"></label>
+      <label>scanlines <input id="pp-scanlines" type="range" min="0" max="1" step="0.01" value="0" style="width:90px"></label>
+      <label>tier <select id="tier"><option>webgl2</option><option>webgl1</option><option>2d</option></select></label>
+    </span>
+    <button id="play" type="button">▶ / ❚❚</button>
+    <span id="info" class="out"></span>
+  </div>
+  <div class="stage">
+    <canvas id="cv" class="view" width="1920" height="1080"></canvas>
+    <div id="glwrap"></div>
+  </div>
+</div>
+
+<script src="../js/core.js"></script>
+<script src="../data/hoshi-to-bokura-to.js"></script>
+<script src="dev-env.js"></script>
+<script src="../js/render/scenes.js" onerror="console.warn('scenes.js missing — using stub frames')"></script>
+<script src="../js/render/fx.js"></script>
+<script src="../js/render/post.js"></script>
+<script>
+/*
+ * FX / Post dev page. URL params: kind=transition|effect|hud|post  name=…  p=0.5  seed=7  bg=scene:<name>@t | stub-a | stub-b  ui=0
+ * Test API window.devFx = { ready, transitions, effects, renderTransition(o), renderEffect(o), renderHUD(o),
+ *   sheet(o), postRender(o), postShot(tier), perf(o), perfPost(o), hash(o), hudBounds(o), frame(o) }.
+ * performance.now() is only used by the dev timing helpers, never inside fx/post drawing.
+ */
+(function () {
+  'use strict';
+  const MV = window.MV;
+  const W = MV.W, H = MV.H;
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const qs = new URLSearchParams(location.search);
+  const TR = MV.transitions.list();
+  const FXN = MV.effects.list();
+  const sceneNames = MV.scenes.list();
+
+  /* ---------- background frames: real scenes when available, else stubs ---------- */
+  function sectionAt(t) {
+    const P = MV.getPreset('hoshi-to-bokura-to');
+    const secs = (P && P.sections) || [];
+    return secs.find((s) => t >= s.start && t < s.end) || secs[secs.length - 1] || null;
+  }
+  function envAt(t, o) {
+    o = o || {};
+    const sec = sectionAt(t);
+    return MV.devEnv(t, { intensity: o.i != null ? o.i : sec ? sec.intensity : 0.7, kind: sec ? sec.kind : 'chorus', sectionStart: sec ? sec.start : 0, sectionEnd: sec ? sec.end : 221.27 });
+  }
+  function stub(c2, which, t) {
+    const C = MV.C;
+    if (which === 'a') {
+      c2.fillStyle = C.night;
+      c2.fillRect(0, 0, W, H);
+      c2.fillStyle = C.star;
+      for (let i = 0; i < 160; i++) {
+        const r = 1 + 3 * MV.rand(5, i, 3);
+        c2.beginPath();
+        c2.arc(MV.rand(5, i, 1) * W, MV.rand(5, i, 2) * H * 0.7, r, 0, MV.TAU);
+        c2.fill();
+      }
+      c2.fillStyle = C.black;
+      c2.beginPath();
+      c2.moveTo(0, H);
+      for (let x = 0; x <= W; x += 80) c2.lineTo(x, H - 180 - 220 * MV.rand(9, x));
+      c2.lineTo(W, H);
+      c2.fill();
+      c2.font = MV.text.font(420, MV.FONTS.latinCond, 400);
+      c2.fillStyle = C.navy;
+      c2.fillText('A', 180, 620);
+    } else {
+      c2.fillStyle = MV.patterns.stripes(c2, { width: 60, colors: [C.red, C.redDeep] });
+      c2.fillRect(0, 0, W, H);
+      c2.fillStyle = C.black;
+      MV.draw.burst(c2, W * 0.62, H * 0.5, 180, 420, 16, 3);
+      c2.fill();
+      c2.font = MV.text.font(420, MV.FONTS.latinCond, 400);
+      c2.fillStyle = C.white;
+      c2.fillText('B', 1350, 700);
+    }
+  }
+  const bgCache = new Map();
+  function bgFrame(spec) {
+    spec = spec || 'stub-a';
+    if (bgCache.has(spec)) return bgCache.get(spec);
+    const f = MV.makeCanvas(W, H);
+    let ok = false;
+    const m = /^scene:([\w-]+)@([\d.]+)$/.exec(spec);
+    if (m && MV.scenes.has(m[1])) {
+      try {
+        const sc = MV.scenes.get(m[1]);
+        if (sc.prepare && !sc.__devPrepared) { sc.prepare({ W, H }); sc.__devPrepared = true; }
+        const t = +m[2];
+        const sec = sectionAt(t);
+        const env = envAt(t);
+        sc.draw(f.ctx, env, { seed: 7, lt: Math.max(0, t - (sec ? sec.start : 0)), dur: 9.66, variant: 0, speed: 1, intensity: env.intensity });
+        ok = true;
+      } catch (e) {
+        console.warn('scene failed, using stub', spec, e);
+      }
+    }
+    if (!ok) stub(f.ctx, /b$/.test(spec) || /sky-red|sunburst|stripes|shards/.test(spec) ? 'b' : 'a', 0);
+    bgCache.set(spec, f.canvas);
+    return f.canvas;
+  }
+  const BGS = ['stub-a', 'stub-b'].concat(
+    ['night-city@20', 'sky-red@50', 'sunburst@4', 'starfield@115', 'crowd@60', 'train@24', 'stripes@90', 'void@120', 'shards@150', 'tunnel@42']
+      .filter((s) => sceneNames.includes(s.split('@')[0])).map((s) => 'scene:' + s)
+  );
+  const DEF_FROM = sceneNames.includes('night-city') ? 'scene:night-city@20' : 'stub-a';
+  const DEF_TO = sceneNames.includes('sky-red') ? 'scene:sky-red@50' : 'stub-b';
+
+  /* ---------- renderers (all draw into a given 2D context at logical 1920×1080) ---------- */
+  function prepCtx(c2) {
+    const k = c2.canvas.width / W;
+    c2.setTransform(1, 0, 0, 1, 0, 0);
+    c2.globalAlpha = 1;
+    c2.globalCompositeOperation = 'source-over';
+    c2.setTransform(k, 0, 0, k, 0, 0);
+  }
+  function drawTransition(c2, o) {
+    prepCtx(c2);
+    const tr = MV.transitions.get(o.name);
+    const t = o.t != null ? +o.t : 50;
+    tr.draw(c2, o.fromCanvas || bgFrame(o.from || DEF_FROM), o.toCanvas === null ? null : o.toCanvas || bgFrame(o.to || DEF_TO), +o.p, envAt(t), o.seed != null ? +o.seed : 7);
+    c2.setTransform(1, 0, 0, 1, 0, 0);
+  }
+  function accentOf(o, t) {
+    const fx = MV.effects.get(o.name);
+    const dur = o.dur != null ? +o.dur : fx.duration;
+    return { kind: o.name, t: t - (+o.lt || 0), dur, strength: o.strength != null ? +o.strength : 1, seed: o.seed != null ? +o.seed : 7, x: o.x, y: o.y, text: o.text, data: o.data };
+  }
+  function drawEffect(c2, o) {
+    prepCtx(c2);
+    const t = o.t != null ? +o.t : 50 + (+o.lt || 0);
+    const env = envAt(t, o);
+    c2.drawImage(bgFrame(o.bg || DEF_FROM), 0, 0, W, H);
+    MV.effects.get(o.name).draw(c2, env, accentOf(o, t));
+    if (o.hud) MV.HUD.draw(c2, env, hudInfo(t));
+    c2.setTransform(1, 0, 0, 1, 0, 0);
+  }
+  function hudInfo(t, extra) {
+    const P = MV.getPreset('hoshi-to-bokura-to');
+    const sec = sectionAt(t);
+    return Object.assign({ title: P.meta.title, artist: P.meta.artist, duration: 221.27, visible: true, sectionName: sec ? sec.name : '' }, extra || {});
+  }
+  function drawHUD(c2, o) {
+    prepCtx(c2);
+    const t = o.t != null ? +o.t : 50;
+    if (!o.transparent) c2.drawImage(bgFrame(o.bg || DEF_FROM), 0, 0, W, H);
+    else c2.clearRect(0, 0, W, H);
+    MV.HUD.draw(c2, envAt(t), hudInfo(t, o.info));
+    if (o.zones) {
+      const z = MV.HUD.zones;
+      c2.strokeStyle = '#0f0';
+      c2.lineWidth = 2;
+      [z.bottomLeft, z.topRight].forEach((r) => c2.strokeRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2));
+    }
+    c2.setTransform(1, 0, 0, 1, 0, 0);
+  }
+  function drawAny(c2, o) {
+    if (o.type === 'transition') drawTransition(c2, o);
+    else if (o.type === 'effect') drawEffect(c2, o);
+    else if (o.type === 'hud') drawHUD(c2, o);
+    else if (o.type === 'bg') { prepCtx(c2); c2.drawImage(bgFrame(o.bg), 0, 0, W, H); }
+  }
+  function renderTransition(o) { drawTransition(ctx, o); return true; }
+  function renderEffect(o) { drawEffect(ctx, o); return true; }
+  function renderHUD(o) { drawHUD(ctx, o); return true; }
+  function frame(o) { drawAny(ctx, o); return true; }
+
+  const off = MV.makeCanvas(W, H);
+  function sheet(o) {
+    const cols = o.cols || 3, rows = o.rows || 2;
+    const cw = W / cols, ch = H / rows;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+    (o.cells || []).forEach((cell, n) => {
+      drawAny(off.ctx, cell);
+      const x = (n % cols) * cw, y = Math.floor(n / cols) * ch;
+      ctx.drawImage(off.canvas, x + 2, y + 2, cw - 4, ch - 4);
+      if (cell.label) {
+        ctx.font = '700 22px system-ui, sans-serif';
+        const w = ctx.measureText(cell.label).width + 16;
+        ctx.fillStyle = 'rgba(0,0,0,0.78)';
+        ctx.fillRect(x + 2, y + ch - 36, w, 34);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(cell.label, x + 10, y + ch - 12);
+      }
+    });
+    return true;
+  }
+
+  /* ---------- Post ---------- */
+  const glwrap = document.getElementById('glwrap');
+  const posts = {};
+  function postFor(tier) {
+    if (posts[tier]) return posts[tier];
+    const c = document.createElement('canvas');
+    c.width = W;
+    c.height = H;
+    c.dataset.tier = tier;
+    c.style.display = 'none';
+    glwrap.appendChild(c);
+    const p = new MV.Post(c, { prefer: tier === 'webgl2' ? 'auto' : tier });
+    posts[tier] = p;
+    return p;
+  }
+  function showPost(tier) {
+    Object.keys(posts).forEach((k) => (posts[k].canvas.style.display = k === tier ? 'block' : 'none'));
+  }
+  function postRender(o) {
+    const post = postFor(o.tier || 'webgl2');
+    const src = o.src === 'cv' ? cv : bgFrame(o.bg || DEF_TO);
+    if (o.w && o.h) post.resize(o.w, o.h);
+    const ok = post.render(src, o.params || {});
+    if (post.gl) post.gl.finish();
+    showPost(o.tier || 'webgl2');
+    return { ok, mode: post.mode, isWebGL: post.isWebGL, error: post.error };
+  }
+  function postShot(tier) {
+    return postFor(tier || 'webgl2').canvas.toDataURL('image/png');
+  }
+  // Post variants into one contact sheet (WebGL output copied into the 2D canvas).
+  function postSheet(o) {
+    const cols = o.cols || 3, rows = o.rows || 3;
+    const cw = W / cols, ch = H / rows;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+    o.cells.forEach((cell, n) => {
+      const r = postRender(cell);
+      const x = (n % cols) * cw, y = Math.floor(n / cols) * ch;
+      ctx.drawImage(postFor(cell.tier || 'webgl2').canvas, x + 2, y + 2, cw - 4, ch - 4);
+      const label = (cell.label || '') + '  [' + r.mode + ']';
+      ctx.font = '700 22px system-ui, sans-serif';
+      const w = ctx.measureText(label).width + 16;
+      ctx.fillStyle = 'rgba(0,0,0,0.78)';
+      ctx.fillRect(x + 2, y + ch - 36, w, 34);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(label, x + 10, y + ch - 12);
+    });
+    showPost('none');
+    return true;
+  }
+  function perfPost(o) {
+    const post = postFor(o.tier || 'webgl2');
+    const src = bgFrame(o.bg || DEF_TO);
+    const n = o.frames || 60;
+    // warm-up
+    post.render(src, o.params || {});
+    if (post.gl) post.gl.finish();
+    const times = [];
+    for (let f = 0; f < n; f++) {
+      const params = Object.assign({}, o.params || {}, { time: f / 60, glitchSeed: f });
+      const t0 = performance.now();
+      post.render(src, params);
+      if (post.gl) {
+        const px = new Uint8Array(4);
+        post.gl.readPixels(0, 0, 1, 1, post.gl.RGBA, post.gl.UNSIGNED_BYTE, px); // sync
+      } else post.ctx2d.getImageData(0, 0, 1, 1);
+      times.push(performance.now() - t0);
+    }
+    return stats(times, { mode: post.mode });
+  }
+  function stats(times, extra) {
+    const s = times.slice().sort((a, b) => a - b);
+    const n = s.length;
+    return Object.assign({ avg: times.reduce((a, b) => a + b, 0) / n, p50: s[Math.floor(n * 0.5)], p95: s[Math.min(n - 1, Math.floor(n * 0.95))], max: s[n - 1] }, extra || {});
+  }
+
+  /* ---------- perf / determinism helpers ---------- */
+  function perf(o) {
+    const n = o.frames || 30;
+    const times = [];
+    drawAny(ctx, Object.assign({}, o, o.type === 'transition' ? { p: 0.5 } : {})); // warm-up (scene caches)
+    for (let f = 0; f < n; f++) {
+      const c = Object.assign({}, o);
+      if (o.type === 'transition') c.p = (f + 0.5) / n;
+      else if (o.type === 'effect') c.lt = ((f + 0.5) / n) * (o.dur || MV.effects.get(o.name).duration);
+      else c.t = 50 + f / 60;
+      const t0 = performance.now();
+      drawAny(ctx, c);
+      ctx.getImageData(0, 0, 1, 1);
+      times.push(performance.now() - t0);
+    }
+    // subtract the plain background blit so the number is the fx cost
+    const bt = [];
+    for (let f = 0; f < Math.min(10, n); f++) {
+      const t0 = performance.now();
+      drawAny(ctx, { type: 'bg', bg: o.bg || DEF_FROM });
+      if (o.type === 'transition') drawAny(ctx, { type: 'bg', bg: o.to || DEF_TO });
+      ctx.getImageData(0, 0, 1, 1);
+      bt.push(performance.now() - t0);
+    }
+    const base = bt.reduce((a, b) => a + b, 0) / bt.length;
+    return stats(times, { base });
+  }
+  let hashCanvas = null;
+  function hash(o) {
+    if (!hashCanvas) {
+      const c = document.createElement('canvas');
+      c.width = W;
+      c.height = H;
+      hashCanvas = c.getContext('2d', { willReadFrequently: true });
+    }
+    drawAny(hashCanvas, o);
+    const d = hashCanvas.getImageData(0, 0, W, H).data;
+    let h = 0x811c9dc5;
+    for (let i = 0; i < d.length; i += 4 * 5) {
+      h ^= d[i] | (d[i + 1] << 8) | (d[i + 2] << 16);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h.toString(16);
+  }
+  // HUD bounds: draw on a transparent canvas, count painted pixels outside the two zones.
+  function hudBounds(o) {
+    const c = document.createElement('canvas');
+    c.width = W;
+    c.height = H;
+    const c2 = c.getContext('2d', { willReadFrequently: true });
+    MV.HUD.draw(c2, envAt(o.t || 50), hudInfo(o.t || 50, o.info));
+    const d = c2.getImageData(0, 0, W, H).data;
+    const z = MV.HUD.zones;
+    const inZ = (x, y, r) => x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+    let outside = 0, inside = 0;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        if (d[(y * W + x) * 4 + 3] === 0) continue;
+        if (inZ(x, y, z.bottomLeft) || inZ(x, y, z.topRight)) inside++;
+        else outside++;
+      }
+    }
+    return { inside, outside };
+  }
+
+  /* ---------- UI ---------- */
+  const $ = (id) => document.getElementById(id);
+  const state = {
+    kind: qs.get('kind') || 'transition', name: qs.get('name') || '', p: +(qs.get('p') || 0.5), seed: +(qs.get('seed') || 7),
+    bg: qs.get('bg') || '', playing: false, tier: 'webgl2',
+  };
+  if (qs.get('ui') === '0') document.body.classList.add('noui');
+  BGS.forEach((b) => { const op = document.createElement('option'); op.value = op.textContent = b; $('bg').appendChild(op); });
+  function fillNames() {
+    const list = state.kind === 'transition' ? TR : state.kind === 'effect' ? FXN : state.kind === 'hud' ? ['hud'] : ['post'];
+    $('name').innerHTML = '';
+    list.forEach((n) => { const op = document.createElement('option'); op.value = op.textContent = n; $('name').appendChild(op); });
+    if (!list.includes(state.name)) state.name = list[0];
+    $('name').value = state.name;
+    document.body.classList.toggle('mode-post', state.kind === 'post');
+  }
+  function effDur() { return state.kind === 'effect' ? (MV.effects.get(state.name) || { duration: 1 }).duration : 1; }
+  function draw() {
+    const t0 = performance.now();
+    if (state.kind === 'transition') drawTransition(ctx, { name: state.name, p: state.p, seed: state.seed, from: DEF_FROM, to: state.bg || DEF_TO });
+    else if (state.kind === 'effect') {
+      const fx = MV.effects.get(state.name);
+      drawEffect(ctx, { name: state.name, lt: state.p * fx.duration, seed: state.seed, bg: state.bg || DEF_FROM, text: window.FX_FIXTURES.captions[state.seed % 4], hud: true });
+    } else if (state.kind === 'hud') drawHUD(ctx, { t: 40 + state.p * 10, bg: state.bg || DEF_FROM });
+    else {
+      const params = {};
+      ['rgbShift', 'glitch', 'grain', 'vignette', 'flash', 'redFlash', 'invert', 'scanlines'].forEach((k) => (params[k] = +$('pp-' + k).value));
+      params.glitchSeed = state.seed + Math.floor(state.p * 20);
+      params.time = state.p * 10;
+      postRender({ tier: $('tier').value, params, bg: state.bg || DEF_TO });
+    }
+    $('pv').textContent = state.kind === 'effect' ? (state.p * effDur()).toFixed(2) + ' s' : 'p ' + state.p.toFixed(2);
+    $('info').textContent = (performance.now() - t0).toFixed(1) + ' ms';
+  }
+  $('kind').onchange = (e) => { state.kind = e.target.value; fillNames(); draw(); };
+  $('name').onchange = (e) => { state.name = e.target.value; draw(); };
+  $('p').oninput = (e) => { state.p = +e.target.value; draw(); };
+  $('seed').oninput = (e) => { state.seed = +e.target.value | 0; draw(); };
+  $('bg').onchange = (e) => { state.bg = e.target.value; draw(); };
+  document.querySelectorAll('.post input, .post select').forEach((el) => (el.oninput = draw));
+  let last = 0;
+  function loop(now) {
+    if (!state.playing) return;
+    const dt = last ? Math.min(0.1, (now - last) / 1000) : 0;
+    last = now;
+    state.p += dt / (state.kind === 'transition' ? (MV.transitions.get(state.name).duration || 0.5) : state.kind === 'effect' ? effDur() : 10);
+    if (state.p > 1) state.p = 0;
+    $('p').value = state.p;
+    draw();
+    requestAnimationFrame(loop);
+  }
+  $('play').onclick = () => { state.playing = !state.playing; last = 0; if (state.playing) requestAnimationFrame(loop); };
+  $('kind').value = state.kind;
+  $('seed').value = state.seed;
+  $('p').value = state.p;
+  fillNames();
+
+  const api = {
+    ready: false, transitions: TR, effects: FXN, scenes: sceneNames, BGS, DEF_FROM, DEF_TO,
+    renderTransition, renderEffect, renderHUD, frame, sheet, postRender, postShot, postSheet, perf, perfPost, hash, hudBounds,
+    effectDuration: (n) => MV.effects.get(n).duration, transitionDuration: (n) => MV.transitions.get(n).duration,
+    layers: () => Object.fromEntries(FXN.map((n) => [n, MV.effects.get(n).layer])),
+    fontsOK: false,
+  };
+  window.devFx = api;
+  const sample = window.FX_FIXTURES.captions.join('') + '星と僕らと小森成雄目黒将司曲歌作詞作曲';
+  (window.FX_FONT_CSS || Promise.resolve(false))
+    .then((cssOk) => (cssOk && window.FX_FONT_RETRY ? window.FX_FONT_RETRY(() => MV.fonts.ensure(sample, 12000)) : MV.fonts.ensure(sample, 12000).then(() => cssOk)))
+    .then((allOk) => {
+      api.fontsOK = allOk;
+      api.fontStatus = [...document.fonts].map((f) => f.family.replace(/"/g, '') + ':' + f.status);
+      bgCache.clear();
+      draw();
+      api.ready = true;
+    });
+})();
+</script>
+</body>
+</html>
